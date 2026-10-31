@@ -44,6 +44,8 @@
 
   profiles.android.module = { config, ... }: {
     env.JAVA_HOME = "${pkgs.jdk21}";
+    # Keep the deprecated alias consistent when a host or CI exports it.
+    env.ANDROID_SDK_ROOT = config.env.ANDROID_HOME;
     env.NDK_HOME = "${config.env.ANDROID_HOME}/ndk/28.2.13676358";
     languages.rust.targets = [
       "aarch64-linux-android"
