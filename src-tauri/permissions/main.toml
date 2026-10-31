@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "native-runtime"
+description = "Use the selected OpenBot service through the native runtime."
+commands.allow = [
+  "browser_sign_in_prepare", "browser_sign_in_open", "browser_sign_in_cancel",
+  "connection_get", "connection_retry", "runtime_start", "connection_set", "http_prepare", "http_open", "http_write",
+  "http_finish", "http_read", "http_cancel", "session_sign_in", "session_sign_out", "session_retry",
+  "socket_prepare", "socket_open", "socket_read", "socket_write", "socket_close"
+]

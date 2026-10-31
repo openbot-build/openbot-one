@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-socket-write"
+description = "Enables the socket_write command without any pre-configured scope."
+commands.allow = ["socket_write"]
+
+[[permission]]
+identifier = "deny-socket-write"
+description = "Denies the socket_write command without any pre-configured scope."
+commands.deny = ["socket_write"]

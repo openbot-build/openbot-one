@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="keyring-openbot-sessions-v1.xml" />
+        <exclude domain="sharedpref" path="keyring-openbot-browser-proofs-v1.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="keyring-openbot-sessions-v1.xml" />
+        <exclude domain="sharedpref" path="keyring-openbot-browser-proofs-v1.xml" />
+    </device-transfer>
+</data-extraction-rules>

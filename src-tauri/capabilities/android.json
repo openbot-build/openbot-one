@@ -1,0 +1,12 @@
+{
+  "identifier": "android",
+  "description": "Android Back handling for the bundled main window.",
+  "windows": ["main"],
+  "platforms": ["android"],
+  "local": true,
+  "permissions": [
+    "core:app:allow-register-listener",
+    "core:app:allow-remove-listener",
+    "core:app:allow-exit"
+  ]
+}

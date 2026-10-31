@@ -1,0 +1,30 @@
+{
+  "package": "@openbot-build/web",
+  "version": "0.1.0",
+  "runtime": 1,
+  "status": "Unpublished native-runtime integration snapshot; no registry release is claimed.",
+  "archive": "openbot-build-web-0.1.0-native-runtime.tgz",
+  "sha256": "cac1ddad3f8810247629c96066c9d21c3e3577fb4d9539815b44dfd14c1a1de9",
+  "source": {
+    "repository": "https://github.com/openbot-build/openbot-ui",
+    "baseCommit": "5362712082f3482173f9e3aee7be8bf75834a8e1",
+    "patch": "native-runtime.patch",
+    "patchSha256": "aae64f2c31e877702d584028ad744d6099fa9aabd09802c57f0462a9e61617b6",
+    "clientVersion": "0.1.5",
+    "license": "MIT"
+  },
+  "checks": {
+    "sharedUiTypecheck": true,
+    "sharedUiBuild": true,
+    "sharedUiTests": 34,
+    "packageTests": 7
+  },
+  "notices": {
+    "bundledCode": "dist/licenses/dependencies.md",
+    "fonts": [
+      "dist/licenses/dm-sans.txt",
+      "dist/licenses/dm-mono.txt"
+    ],
+    "fontVersions": "dist/licenses/fonts.json"
+  }
+}

@@ -1,0 +1,261 @@
+name: Check native platforms
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # These are debug checks. No production origin or signing secret is needed.
+  OPENBOT_DEFAULT_API_ORIGIN: http://localhost:19380
+  OPENBOT_NATIVE_CLIENT_ID: openbot-one
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux Nix checks and development binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          extra-conf: |
+            extra-substituters = https://devenv.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+          diagnostic-endpoint: ""
+      - name: Install devenv
+        run: nix profile add github:cachix/devenv/v2.3.1
+      - name: Install locked dependencies
+        run: devenv shell -- pnpm install --frozen-lockfile
+      - name: Check workflow
+        run: devenv shell -- actionlint .github/workflows/check.yml
+      - name: Check JavaScript and real Web package
+        run: |
+          devenv shell -- pnpm typecheck
+          devenv shell -- pnpm test
+          devenv shell -- pnpm build
+      - name: Check native code
+        run: |
+          devenv shell -- cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          devenv shell -- cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          devenv shell -- pnpm native:test
+      - name: Build bundled debug binary
+        run: devenv shell -- pnpm desktop:build --debug --no-bundle --ci
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: openbot-linux-nix-x64-debug
+          path: src-tauri/target/debug/openbot-one
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop:
+    name: ${{ matrix.name }} native checks and debug package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            os: macos-15
+            artifact: openbot-macos-arm64-debug
+          - name: macOS Intel
+            os: macos-15-intel
+            artifact: openbot-macos-x64-debug
+          - name: Windows x64
+            os: windows-2025
+            artifact: openbot-windows-x64-debug
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Set up pinned tools
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+          cargo --version
+          rustc --version
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check JavaScript and real Web package
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm build
+      - name: Check native code
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          pnpm native:test
+      - name: Build macOS app with ad-hoc signing
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          pnpm desktop:build --debug --bundles app --ci
+          minimum=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' src-tauri/target/debug/bundle/macos/OpenBot.app/Contents/Info.plist)
+          [[ "$minimum" == "13.3" || "$minimum" == "13.3.0" ]]
+          mkdir -p .cache/ci
+          ditto -c -k --sequesterRsrc --keepParent src-tauri/target/debug/bundle/macos/OpenBot.app .cache/ci/OpenBot.app.zip
+      - name: Build Windows debug installer
+        if: runner.os == 'Windows'
+        run: |
+          pnpm desktop:build --debug --bundles nsis --ci
+          mkdir -p .cache/ci
+          cp src-tauri/target/debug/bundle/nsis/*-setup.exe .cache/ci/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ matrix.artifact }}
+          include-hidden-files: true
+          path: .cache/ci/*
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Android ARM64 and x86_64 debug APKs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          extra-conf: |
+            extra-substituters = https://devenv.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-flakehub: false
+          diagnostic-endpoint: ""
+      - name: Install devenv
+        run: nix profile add github:cachix/devenv/v2.3.1
+      - name: Install locked dependencies
+        run: devenv --profile android shell -- pnpm install --frozen-lockfile
+      - name: Build and verify APKs
+        run: devenv --profile android shell -- pnpm android:clean:check aarch64 x86_64
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: openbot-android-debug
+          include-hidden-files: true
+          path: |
+            .cache/android-clean-build/run */.cache/artifacts/*.apk
+            .cache/android-clean-build/run */.cache/artifacts/*-build.json
+            .cache/android-clean-build/run */.cache/artifacts/verified.json
+            .cache/android-clean-build/run */result.json
+          if-no-files-found: error
+          retention-days: 7
+
+  ios:
+    name: iOS unsigned simulator build
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Set up pinned tools and simulator target
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+          cargo --version
+          rustup target add aarch64-apple-ios-sim
+          xcodebuild -version
+      - name: Install locked dependencies and stage the real Web package
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Generate iOS project without a development team
+        run: pnpm ios:init --ci --skip-targets-install
+      - name: Build unsigned simulator app
+        run: pnpm ios:build --debug --target aarch64-sim --no-sign --ci
+      - name: Save simulator app and generated project
+        run: |
+          mkdir -p .cache/ci
+          tar --exclude=target --exclude=build --exclude=Pods --exclude=Externals --exclude=DerivedData -czf .cache/ci/ios-generated-project.tar.gz -C src-tauri/gen apple
+          apps=()
+          while IFS= read -r -d '' app; do
+            bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+            if [ "$bundle" = "build.openbot.one" ]; then
+              apps+=("$app")
+            fi
+          done < <(find src-tauri/gen/apple -type d -name '*.app' -not -path '*.xcarchive/*' -prune -print0)
+          test "${#apps[@]}" -eq 1
+          test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "${apps[0]}/Info.plist")"
+          minimum=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "${apps[0]}/Info.plist")
+          [[ "$minimum" == "16.4" || "$minimum" == "16.4.0" ]]
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "${apps[0]}/Info.plist")" = "build.openbot.one"
+          ditto -c -k --keepParent "${apps[0]}" .cache/ci/OpenBot-ios-simulator.app.zip
+          test -f .cache/ci/OpenBot-ios-simulator.app.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: openbot-ios-simulator-unsigned
+          include-hidden-files: true
+          path: .cache/ci/*
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-packages:
+    name: Ubuntu baseline packages and install checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install locked build helpers
+        run: |
+          npm install --global corepack@0.36.0
+          corepack enable
+          pnpm install --frozen-lockfile
+      - name: Build real Debian and AppImage packages in Ubuntu 22.04
+        run: pnpm linux:package
+      - name: Check installation and isolated native UI
+        run: pnpm linux:install:check --fixture
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: openbot-linux-x64-package-checks
+          include-hidden-files: true
+          path: |
+            .cache/linux-packages/*.deb
+            .cache/linux-packages/*.AppImage
+            .cache/linux-packages/build.json
+            .cache/linux-packages/build-packages.txt
+            .cache/linux-packages/install-fixture.json
+            .cache/linux-packages/*-fixture-check/result.json
+            .cache/linux-packages/*-fixture-check/*.png
+          if-no-files-found: error
+          retention-days: 7

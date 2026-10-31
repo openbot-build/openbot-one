@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- The device's Keystore key cannot travel with its encrypted values. -->
+    <exclude domain="sharedpref" path="keyring-openbot-sessions-v1.xml" />
+        <exclude domain="sharedpref" path="keyring-openbot-browser-proofs-v1.xml" />
+</full-backup-content>

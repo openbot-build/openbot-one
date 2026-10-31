@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-sign-in-watch"
+description = "Enables the browser_sign_in_watch command without any pre-configured scope."
+commands.allow = ["browser_sign_in_watch"]
+
+[[permission]]
+identifier = "deny-browser-sign-in-watch"
+description = "Denies the browser_sign_in_watch command without any pre-configured scope."
+commands.deny = ["browser_sign_in_watch"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-socket-read"
+description = "Enables the socket_read command without any pre-configured scope."
+commands.allow = ["socket_read"]
+
+[[permission]]
+identifier = "deny-socket-read"
+description = "Denies the socket_read command without any pre-configured scope."
+commands.deny = ["socket_read"]

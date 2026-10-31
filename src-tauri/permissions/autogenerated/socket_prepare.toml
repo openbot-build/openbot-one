@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-socket-prepare"
+description = "Enables the socket_prepare command without any pre-configured scope."
+commands.allow = ["socket_prepare"]
+
+[[permission]]
+identifier = "deny-socket-prepare"
+description = "Denies the socket_prepare command without any pre-configured scope."
+commands.deny = ["socket_prepare"]

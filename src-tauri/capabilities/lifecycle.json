@@ -1,0 +1,22 @@
+{
+  "identifier": "lifecycle",
+  "description": "Typed mobile activity channels for the bundled main app.",
+  "windows": [
+    "main"
+  ],
+  "platforms": [
+    "android",
+    "iOS"
+  ],
+  "local": true,
+  "permissions": [
+    "lifecycle-channel",
+    "mobile-browser-return",
+    "core:event:deny-listen",
+    "core:event:deny-unlisten",
+    "deep-link:deny-get-current",
+    "deep-link:deny-register",
+    "deep-link:deny-unregister",
+    "deep-link:deny-is-registered"
+  ]
+}

@@ -1,0 +1,2065 @@
+diff --git a/.gitignore b/.gitignore
+index 8ab2d0d..bf6b1cc 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,6 @@
+ node_modules/
+ dist/
++runtime/
+ .cache/
+ .devenv*
+ .direnv/
+diff --git a/README.md b/README.md
+index e974364..2c867ba 100644
+--- a/README.md
++++ b/README.md
+@@ -18,3 +18,63 @@ and TypeScript and TSX use the local TypeScript 7 language server. Install the
+ project packages before opening TypeScript files in Zed.
+ 
+ MIT. See [LICENSE](./LICENSE). Installed packages keep their own licenses.
++
++## Native shell entry
++
++The browser remains the default. A native shell can import
++`@openbot-build/web/runtime` and call `installRuntime` before the app entry runs.
++The `NativeRuntime` type defines the version 1 boundary. It supplies the HTTPS
++API origin, a Fetch-compatible transport, login/logout, Live WebSockets,
++clipboard writes, and external URL opening. Keep long-lived credentials in the
++native process. The transport must preserve cancellation and streamed responses.
++Direct file uploads use `fetchResource`, which selects that native transport or
++browser fetch. The shell must check file-storage destinations separately and
++keep API credentials out of those requests.
++Login resolves only when the new native session can make API calls; the UI then
++opens the saved local return path.
++
++`pnpm build` also builds the public runtime module and its types. The static
++build contains `openbot-runtime.json`, which tells a shell which runtime version
++the UI accepts, and `licenses/dependencies.md`. Ship these files with the assets.
++The shell must load its adapter before the UI module. Do not rewrite the bundled
++application code or point native requests at the page origin.
++
++An optional `emailSignIn: true` means native fetch can accept the published
++email-code login. The shared form uses the same typed client and error messages
++as the browser. The shell must capture the session cookie only from a successful
++`POST /auth/email/verify`, check it through `/auth/session`, and keep it out of
++response headers and Web storage. Complete the session before resolving fetch;
++the page then reloads with the account's storage namespace. Old shells without
++the flag do not offer this flow.
++
++An optional `browserSignIn` action offers company sign-in through the system
++browser. The shell owns PKCE, exact callbacks, state and issuer checks, private
++session exchange, and account validation. The UI passes only email/invitation
++hints and an AbortSignal; no code or credential reaches web scripts. The form
++shows a waiting state and Cancel sign-in. The shell must bind preparation and
++cancellation to the document, service and a unique operation ID so a late cancel
++cannot stop a new attempt. Unsupported shells keep this option hidden.
++
++The optional `session` field gives only persistence/recovery status and a retry
++action. It carries no credential. The shell must verify a saved session with
++its service before restoring the account. If saving cannot be confirmed, the
++shared app shows that another sign-in may be needed after close. Retry either
++checks the saved sign-in or finishes its removal. Service selection returns to
++the app entry so a remembered account can resume without another email code.
++
++Live capture loads a local `capture-worklet` build asset. It must remain a
++separate file in `dist/assets`; strict native CSP does not allow Blob scripts.
++Ship that file with the rest of the Web assets. Browser and native capture use
++the same worklet and cancellation path.
++
++The shared layout uses CSS safe areas and the visual viewport for the keyboard.
++It keeps pinch zoom available and never clears focus on resize. Dialogs and
++side sheets use the same visible height as the chat. An optional `onBackPress`
++runtime action lets Android close the last open dialog or sheet first. The
++shell handles history and root exit when no shared surface consumes Back.
++
++An optional `onAppStateChange` reports mobile activity changes. Live talks end
++when the app becomes inactive, the page is hidden, or the chat/organization
++changes. Returning to the app never starts a new talk. Pending microphone
++grants and worklet setup are canceled; a late grant has its tracks stopped.
++The media prompt itself cannot be withdrawn through `getUserMedia`.
+diff --git a/index.html b/index.html
+index 03e48f9..43f325f 100644
+--- a/index.html
++++ b/index.html
+@@ -2,7 +2,7 @@
+ <html lang="en">
+ 	<head>
+ 		<meta charset="utf-8" />
+-		<meta name="viewport" content="width=device-width, initial-scale=1" />
++		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+ 		<meta name="color-scheme" content="dark light" />
+ 		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+ 		<link rel="manifest" href="/manifest.json" />
+@@ -25,7 +25,7 @@
+ 		</script>
+ 	</head>
+ 	<body>
+-		<div id="root"></div>
++		<div id="root"><div role="status" class="flex min-h-svh items-center justify-center text-body-large">Opening OpenBot…</div></div>
+ 		<script type="module" src="/src/main.tsx"></script>
+ 	</body>
+ </html>
+diff --git a/package.json b/package.json
+index af51a1d..1b1cafa 100644
+--- a/package.json
++++ b/package.json
+@@ -6,7 +6,8 @@
+ 	"description": "The web app for OpenBot",
+ 	"scripts": {
+ 		"dev": "vite",
+-		"build": "vite build",
++		"build": "vite build && pnpm build:runtime",
++		"build:runtime": "tsc -p tsconfig.runtime.json && node scripts/runtime-manifest.mjs",
+ 		"preview": "vite preview",
+ 		"test": "tsc -p tsconfig.test.json && node --test test/*.test.ts",
+ 		"typecheck": "tsc -p tsconfig.json --noEmit",
+@@ -55,9 +56,14 @@
+ 	},
+ 	"files": [
+ 		"dist",
++		"runtime",
+ 		"LICENSE"
+ 	],
+ 	"exports": {
++		"./runtime": {
++			"types": "./runtime/runtime.d.ts",
++			"default": "./runtime/runtime.js"
++		},
+ 		"./package.json": "./package.json"
+ 	},
+ 	"publishConfig": {
+diff --git a/scripts/runtime-manifest.mjs b/scripts/runtime-manifest.mjs
+new file mode 100644
+index 0000000..8565e42
+--- /dev/null
++++ b/scripts/runtime-manifest.mjs
+@@ -0,0 +1,27 @@
++import { copyFile, mkdir, writeFile, readFile } from "node:fs/promises"
++import { createRequire } from "node:module"
++import { dirname, join } from "node:path"
++
++const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"))
++await writeFile(new URL("../dist/openbot-runtime.json", import.meta.url), JSON.stringify({
++	version: 1,
++	package: manifest.name,
++	packageVersion: manifest.version,
++	entry: "index.html",
++}, null, 2) + "\n")
++
++// Vite gathers bundled code notices. Preserve font licenses as separate assets.
++const require = createRequire(import.meta.url)
++const licenses = new URL("../dist/licenses/", import.meta.url)
++await mkdir(licenses, { recursive: true })
++const fonts = []
++for (const [name, file] of [
++	["@fontsource-variable/dm-sans", "dm-sans.txt"],
++	["@fontsource/dm-mono", "dm-mono.txt"],
++]) {
++	const path = require.resolve(name + "/package.json")
++	const font = JSON.parse(await readFile(path, "utf8"))
++	await copyFile(join(dirname(path), "LICENSE"), new URL(file, licenses))
++	fonts.push({ package: name, version: font.version, license: font.license, file })
++}
++await writeFile(new URL("fonts.json", licenses), JSON.stringify(fonts, null, 2) + "\n")
+diff --git a/src/atoms/account.ts b/src/atoms/account.ts
+index d80e568..aabfd21 100644
+--- a/src/atoms/account.ts
++++ b/src/atoms/account.ts
+@@ -1,6 +1,7 @@
+ import { Effect } from "effect"
+ import * as Atom from "effect/reactivity/Atom"
+ import { Api, apiRuntime } from "@/lib/api"
++import { nativeRuntime, returnPath } from "@/lib/runtime"
+ 
+ /** The signed-in account, with its organizations. It fails when nobody signed in. */
+ export const accountAtom = apiRuntime.atom(
+@@ -16,7 +17,20 @@ export const signInAtom = apiRuntime.fn(
+ 		readonly email?: string
+ 		readonly returnTo?: string
+         readonly invitation?: string
++        readonly browser?: boolean
++        readonly signal?: AbortSignal
+ 	}) {
++		const native = nativeRuntime()
++		if (native !== undefined) {
++			const returnTo = returnPath(input.returnTo)
++			yield* Effect.tryPromise({
++				try: () => input.browser === true
++                    ? native.browserSignIn?.({ ...input, returnTo }) ?? Promise.reject(new Error("Browser sign-in is not available in this app."))
++                    : native.signIn({ ...input, returnTo }),
++				catch: (cause) => cause instanceof Error ? cause : new Error("Sign-in failed. Try again."),
++			})
++			return yield* Effect.sync(() => globalThis.location.replace(returnTo))
++		}
+ 		const client = yield* Api
+ 		const start = yield* client.api.signIn.signIn({
+ 			payload: {
+@@ -45,13 +59,17 @@ export const developmentSignIn = (returnTo: string) =>
+ 	})
+ 
+ /** Better Auth serves the sign-out route. It is not in the API contract. */
+-export const signOut = () =>
+-	fetch("/auth/sign-out", {
++export const signOut = () => {
++	const native = nativeRuntime()
++	if (native !== undefined)
++		return native.signOut().finally(() => globalThis.location.replace("/sign-in"))
++	return fetch("/auth/sign-out", {
+ 		method: "POST",
+ 		credentials: "same-origin",
+ 		headers: { "Content-Type": "application/json" },
+ 		body: "{}",
+ 	}).finally(() => globalThis.location.assign("/sign-in"))
++}
+ 
+ /** The initials of a name or an email, for the avatar. */
+ export const initials = (
+diff --git a/src/atoms/files.ts b/src/atoms/files.ts
+index a1850d2..f87f22d 100644
+--- a/src/atoms/files.ts
++++ b/src/atoms/files.ts
+@@ -2,6 +2,7 @@ import { FilesApi } from "@openbot-build/client/Api"
+ import { Effect, Schema, Stream } from "effect"
+ import * as Atom from "effect/reactivity/Atom"
+ import { Api, apiRuntime } from "@/lib/api"
++import { fetchResource } from "@/lib/runtime"
+ 
+ /**
+  * Uploads one file for a message. It sends the file through OpenBot first. When
+@@ -26,12 +27,14 @@ export const uploadFileAtom = apiRuntime.fn(
+ 						},
+ 					})
+ 					yield* Effect.tryPromise({
+-						try: () =>
+-							fetch(upload.url, {
++						try: (signal) =>
++							fetchResource(upload.url, {
+ 								method: upload.method,
+ 								headers: upload.headers,
+ 								body: file,
+-							}).then((response) => {
++								signal,
++							}).then(async (response) => {
++								await response.body?.cancel()
+ 								if (!response.ok)
+ 									throw new Error("The storage did not take the file.")
+ 							}),
+diff --git a/src/components/app/ConnectionSettings.tsx b/src/components/app/ConnectionSettings.tsx
+new file mode 100644
+index 0000000..4e961eb
+--- /dev/null
++++ b/src/components/app/ConnectionSettings.tsx
+@@ -0,0 +1,130 @@
++import { type ReactNode, useId, useState } from "react"
++import { Button } from "@/components/ui/button"
++import {
++	Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
++} from "@/components/ui/dialog"
++import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
++import { Input } from "@/components/ui/input"
++import { Spinner } from "@/components/ui/spinner"
++import { nativeRuntime, normalizeServiceOrigin } from "@/lib/runtime"
++import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
++import { Logo } from "@/components/app/Logo"
++
++const recoveryMessages = {
++	"invalid-settings": "Your saved service settings could not be used. Save a service address to replace them.",
++	"unsupported-version": "Your service settings are from another app version. Update the app, or save an address to replace them.",
++	"unreadable-settings": "Your service settings could not be read. Try again, or save a service address.",
++}
++
++/** Mount account and API screens only after the saved service is ready. */
++export function ConnectionGate({ children }: { readonly children: ReactNode }) {
++	const recovery = nativeRuntime()?.connection?.recovery
++	if (!recovery) return children
++	return (
++		<main className="flex min-h-(--app-height) flex-col items-center justify-center gap-8 bg-background p-4">
++			<div className="flex items-center gap-2.5 text-headline-small">
++				<Logo />
++			</div>
++			<Card className="w-full max-w-md">
++				<CardHeader>
++					<CardTitle><h1>Check your service settings</h1></CardTitle>
++					<CardDescription>{recoveryMessages[recovery]}</CardDescription>
++				</CardHeader>
++				<CardContent><ConnectionForm /></CardContent>
++			</Card>
++		</main>
++	)
++}
++
++/** Keep the service picker available before sign-in and when a service is down. */
++export function ConnectionSettings() {
++	if (!nativeRuntime()?.connection) return null
++	return (
++		<Dialog>
++			<DialogTrigger render={<Button variant="ghost" />}>Service settings</DialogTrigger>
++			<DialogContent>
++				<DialogHeader>
++					<DialogTitle>Service settings</DialogTitle>
++					<DialogDescription>Choose the OpenBot service for this app.</DialogDescription>
++				</DialogHeader>
++				<DialogBody><ConnectionForm /></DialogBody>
++			</DialogContent>
++		</Dialog>
++	)
++}
++
++const sessionMessages = {
++	"browser-sign-in-incomplete": "Browser sign-in did not finish. Please sign in again.",
++	"store-unavailable": "Your device could not read your saved sign-in. Unlock its credential store and try again, or sign in again.",
++	"service-unavailable": "Your saved sign-in could not be checked. Check your service connection and try again.",
++	"invalid-saved-sign-in": "Your saved sign-in could not be used. Try again or sign in again.",
++	"not-saved": "Your device could not remember this sign-in. You may need to sign in again after closing the app. Try again.",
++	"cleanup-pending": "You are signed out here. Your device still needs to remove the saved sign-in. Unlock its credential store and try again.",
++	"sign-out-incomplete": "Your device could not remove your saved sign-in. Unlock its credential store and try again before closing the app.",
++}
++
++export function NativeSessionNotice() {
++	const session = nativeRuntime()?.session
++	const [busy, setBusy] = useState(false)
++	const [error, setError] = useState<string>()
++	if (!session?.issue) return null
++	return <Field role="status">
++		<FieldDescription>{sessionMessages[session.issue]}</FieldDescription>
++		{session.issue !== "browser-sign-in-incomplete" ? <Button type="button" variant="ghost" disabled={busy} onClick={() => {
++			setBusy(true); setError(undefined)
++			void session.retry().catch((cause: unknown) => {
++				setError(cause instanceof Error ? cause.message : "The saved sign-in could not be updated.")
++				setBusy(false)
++			})
++		}}>{busy ? <Spinner /> : null} Retry saved sign-in</Button> : null}
++		{error ? <FieldError>{error}</FieldError> : null}
++	</Field>
++}
++
++export function ConnectionForm() {
++	const native = nativeRuntime()
++	const connection = native?.connection
++	const id = useId()
++	const [origin, setOrigin] = useState(native?.apiOrigin ?? "")
++	const [error, setError] = useState<string>()
++	const [busy, setBusy] = useState(false)
++	if (!connection || !native) return null
++	const run = async (action: () => Promise<void>) => {
++		setError(undefined)
++		setBusy(true)
++		try {
++			await action()
++		} catch (cause) {
++			setError(cause instanceof Error ? cause.message : String(cause))
++			setBusy(false)
++		}
++	}
++	const save = (value: string | null) => run(() =>
++		connection.change(value === null ? null : normalizeServiceOrigin(value, native.development)))
++	return (
++		<form onSubmit={(event) => { event.preventDefault(); void save(origin) }}>
++			<FieldGroup>
++				<NativeSessionNotice />
++				<Field data-invalid={Boolean(error)}>
++					<FieldLabel htmlFor={id}>Service address</FieldLabel>
++					<Input id={id} type="url" autoComplete="url" autoCapitalize="none" spellCheck={false}
++						value={origin} onChange={(event) => setOrigin(event.target.value)} disabled={busy}
++						aria-invalid={Boolean(error)} aria-describedby={`${id}-help${error ? ` ${id}-error` : ""}`} required />
++					<FieldDescription id={`${id}-help`}>
++						Use the service address without an API path. Each service has its own sign-in.
++					</FieldDescription>
++					{error ? <FieldError id={`${id}-error`}>{error}</FieldError> : null}
++				</Field>
++				<Field orientation="horizontal">
++					<Button type="submit" disabled={busy}>{busy ? <Spinner /> : null} Save and connect</Button>
++					<Button type="button" variant="ghost" disabled={busy} onClick={() => void save(null)}>Use default</Button>
++				</Field>
++				{connection.recovery && connection.retry ? (
++					<Field><Button type="button" variant="ghost" disabled={busy}
++						onClick={() => void run(connection.retry!)}>Retry saved settings</Button></Field>
++				) : null}
++				<FieldDescription className="break-all">Default: {connection.defaultOrigin}</FieldDescription>
++			</FieldGroup>
++		</form>
++	)
++}
+diff --git a/src/components/app/Markdown.tsx b/src/components/app/Markdown.tsx
+index 63d47e4..7b63cf4 100644
+--- a/src/components/app/Markdown.tsx
++++ b/src/components/app/Markdown.tsx
+@@ -1,6 +1,7 @@
+ import { memo } from "react"
+ import ReactMarkdown, { type Components } from "react-markdown"
+ import remarkGfm from "remark-gfm"
++import { toast } from "sonner"
+ import {
+ 	CodeBlock,
+ 	CodeBlockActions,
+@@ -12,6 +13,7 @@ import {
+ } from "@/components/ui/code-block"
+ import { useHighlightedCode } from "@/hooks/use-highlighted-code"
+ import { cn } from "@/lib/utils"
++import { externalUrl, nativeRuntime } from "@/lib/runtime"
+ 
+ function FencedCode({
+ 	language,
+@@ -51,7 +53,18 @@ const components: Components = {
+ 		return <FencedCode language={language ?? "text"} code={text} />
+ 	},
+ 	a: ({ href, children }) => (
+-		<a href={href} target="_blank" rel="noreferrer noopener">
++		<a href={href} target="_blank" rel="noreferrer noopener" onClick={(event) => {
++			const native = nativeRuntime()
++			if (native === undefined) return
++			event.preventDefault()
++			try {
++				void native.openExternal(externalUrl(href ?? "")).catch(() => {
++					toast.error("This link could not be opened.")
++				})
++			} catch {
++				toast.error("This link is not supported.")
++			}
++		}}>
+ 			{children}
+ 		</a>
+ 	),
+diff --git a/src/components/app/SettingsDialog.tsx b/src/components/app/SettingsDialog.tsx
+index a34a773..588cbd9 100644
+--- a/src/components/app/SettingsDialog.tsx
++++ b/src/components/app/SettingsDialog.tsx
+@@ -58,6 +58,7 @@ import { type SettingsTab, settingsTabAtom } from "@/atoms/ui"
+ import { useCopy } from "@/hooks/use-copy"
+ import { errorMessage, organizationAtom } from "@/lib/api"
+ import { resultValue } from "@/lib/utils"
++import { ConnectionSettings } from "@/components/app/ConnectionSettings"
+ 
+ /** The settings of the person: the look, the account and the user tokens. */
+ export function SettingsDialog() {
+@@ -118,6 +119,7 @@ function GeneralSettings() {
+ 		account?.memberships.filter((item) => item.status === "active") ?? []
+ 	return (
+ 		<FieldGroup>
++			<ConnectionSettings />
+ 			<FieldSet className="gap-3">
+ 				<FieldLegend variant="label">Theme</FieldLegend>
+ 				<div className="grid grid-cols-3 rounded-lg bg-input p-1 [corner-shape:round]">
+diff --git a/src/components/ui/alert-dialog.tsx b/src/components/ui/alert-dialog.tsx
+index 35c5358..e90a108 100644
+--- a/src/components/ui/alert-dialog.tsx
++++ b/src/components/ui/alert-dialog.tsx
+@@ -1,13 +1,21 @@
+ "use client"
+ 
+ import * as React from "react"
++import { useBackDismiss } from "@/hooks/use-back-dismiss"
+ import { AlertDialog as AlertDialogPrimitive } from "@base-ui/react/alert-dialog"
+ import { cn } from "@/lib/cn"
+ 
+ import { Button } from "@/components/ui/button"
+ 
+-function AlertDialog({ ...props }: AlertDialogPrimitive.Root.Props) {
+-	return <AlertDialogPrimitive.Root data-slot="alert-dialog" {...props} />
++function AlertDialog(props: AlertDialogPrimitive.Root.Props) {
++	const localActions = React.useRef<AlertDialogPrimitive.Root.Actions | null>(null)
++	const actions = props.actionsRef ?? localActions
++	const [open, setOpen] = React.useState(props.defaultOpen ?? false)
++	useBackDismiss(props.open ?? open, actions)
++	return <AlertDialogPrimitive.Root data-slot="alert-dialog" {...props} actionsRef={actions} onOpenChange={(next, details) => {
++		props.onOpenChange?.(next, details)
++		if (!details.isCanceled) setOpen(next)
++	}} />
+ }
+ 
+ function AlertDialogTrigger({ ...props }: AlertDialogPrimitive.Trigger.Props) {
+@@ -52,7 +60,7 @@ function AlertDialogContent({
+ 				data-slot="alert-dialog-content"
+ 				data-size={size}
+ 				className={cn(
+-					"group/alert-dialog-content fixed top-1/2 left-1/2 z-50 dialog-frame flex flex-col overflow-hidden -translate-x-1/2 -translate-y-1/2 gap-4 rounded-dialog nested-controls bg-popover p-(--surface-inset) text-popover-foreground duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
++					"group/alert-dialog-content fixed top-(--dialog-top) left-(--dialog-left) z-50 dialog-frame flex flex-col overflow-hidden -translate-x-1/2 -translate-y-1/2 gap-4 rounded-dialog nested-controls bg-popover p-(--surface-inset) text-popover-foreground duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+ 					className,
+ 				)}
+ 				{...props}
+diff --git a/src/components/ui/code-block.tsx b/src/components/ui/code-block.tsx
+index 38a5b30..128472f 100644
+--- a/src/components/ui/code-block.tsx
++++ b/src/components/ui/code-block.tsx
+@@ -4,6 +4,7 @@ import { cn } from "@/lib/cn"
+ 
+ import { Button } from "@/components/ui/button"
+ import { CheckIcon, CopyIcon } from "lucide-react"
++import { writeClipboard } from "@/lib/runtime"
+ 
+ const codeBlockVariants = cva(
+ 	"group/code-block relative flex w-full min-w-0 flex-col overflow-hidden rounded-surface [corner-shape:round] text-body-medium has-[>[data-slot=code-block-content]:focus-visible]:ring-2 has-[>[data-slot=code-block-content]:focus-visible]:ring-ring/30 data-[size=sm]:text-body-small",
+@@ -110,8 +111,7 @@ function CodeBlockCopyButton({
+ 				className={cn("rounded-full", className)}
+ 				onClick={(event) => {
+ 					onClick?.(event)
+-					navigator.clipboard
+-						.writeText(value)
++					writeClipboard(value)
+ 						.then(() => setCopied(true))
+ 						.catch(() => {})
+ 				}}
+diff --git a/src/components/ui/dialog.tsx b/src/components/ui/dialog.tsx
+index d65be3b..9a92168 100644
+--- a/src/components/ui/dialog.tsx
++++ b/src/components/ui/dialog.tsx
+@@ -1,12 +1,20 @@
+ import * as React from "react"
++import { useBackDismiss } from "@/hooks/use-back-dismiss"
+ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
+ import { cn } from "@/lib/cn"
+ 
+ import { Button } from "@/components/ui/button"
+ import { XIcon } from "lucide-react"
+ 
+-function Dialog({ ...props }: DialogPrimitive.Root.Props) {
+-	return <DialogPrimitive.Root data-slot="dialog" {...props} />
++function Dialog(props: DialogPrimitive.Root.Props) {
++	const localActions = React.useRef<DialogPrimitive.Root.Actions | null>(null)
++	const actions = props.actionsRef ?? localActions
++	const [open, setOpen] = React.useState(props.defaultOpen ?? false)
++	useBackDismiss(props.open ?? open, actions)
++	return <DialogPrimitive.Root data-slot="dialog" {...props} actionsRef={actions} onOpenChange={(next, details) => {
++		props.onOpenChange?.(next, details)
++		if (!details.isCanceled) setOpen(next)
++	}} />
+ }
+ 
+ function DialogTrigger({ ...props }: DialogPrimitive.Trigger.Props) {
+@@ -52,7 +60,7 @@ function DialogContent({
+ 				data-slot="dialog-content"
+ 				data-close-button={showCloseButton || undefined}
+ 				className={cn(
+-					"group/dialog-content fixed top-1/2 left-1/2 z-50 dialog-frame flex flex-col overflow-hidden -translate-x-1/2 -translate-y-1/2 gap-4 rounded-dialog nested-controls bg-popover p-(--surface-inset) text-body-medium text-popover-foreground duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
++					"group/dialog-content fixed top-(--dialog-top) left-(--dialog-left) z-50 dialog-frame flex flex-col overflow-hidden -translate-x-1/2 -translate-y-1/2 gap-4 rounded-dialog nested-controls bg-popover p-(--surface-inset) text-body-medium text-popover-foreground duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+ 					className,
+ 				)}
+ 				{...props}
+diff --git a/src/components/ui/sheet.tsx b/src/components/ui/sheet.tsx
+index fb9b4fa..2e85736 100644
+--- a/src/components/ui/sheet.tsx
++++ b/src/components/ui/sheet.tsx
+@@ -1,14 +1,22 @@
+ "use client"
+ 
+ import * as React from "react"
++import { useBackDismiss } from "@/hooks/use-back-dismiss"
+ import { Dialog as SheetPrimitive } from "@base-ui/react/dialog"
+ import { cn } from "@/lib/cn"
+ 
+ import { Button } from "@/components/ui/button"
+ import { XIcon } from "lucide-react"
+ 
+-function Sheet({ ...props }: SheetPrimitive.Root.Props) {
+-	return <SheetPrimitive.Root data-slot="sheet" {...props} />
++function Sheet(props: SheetPrimitive.Root.Props) {
++	const localActions = React.useRef<SheetPrimitive.Root.Actions | null>(null)
++	const actions = props.actionsRef ?? localActions
++	const [open, setOpen] = React.useState(props.defaultOpen ?? false)
++	useBackDismiss(props.open ?? open, actions)
++	return <SheetPrimitive.Root data-slot="sheet" {...props} actionsRef={actions} onOpenChange={(next, details) => {
++		props.onOpenChange?.(next, details)
++		if (!details.isCanceled) setOpen(next)
++	}} />
+ }
+ 
+ function SheetTrigger({ ...props }: SheetPrimitive.Trigger.Props) {
+@@ -53,7 +61,7 @@ function SheetContent({
+ 				data-slot="sheet-content"
+ 				data-side={side}
+ 				className={cn(
+-					"fixed z-50 flex flex-col overflow-y-auto data-[side=bottom]:rounded-t-sheet data-[side=top]:rounded-b-sheet data-[side=left]:rounded-r-sheet data-[side=right]:rounded-l-sheet bg-popover bg-clip-padding text-body-medium text-popover-foreground transition duration-200 ease-in-out data-ending-style:opacity-0 data-starting-style:opacity-0 data-[side=bottom]:inset-x-0 data-[side=bottom]:bottom-0 data-[side=bottom]:h-auto data-[side=bottom]:data-ending-style:translate-y-[2.5rem] data-[side=bottom]:data-starting-style:translate-y-[2.5rem] data-[side=left]:inset-y-0 data-[side=left]:left-0 data-[side=left]:h-full data-[side=left]:w-3/4 data-[side=left]:data-ending-style:translate-x-[-2.5rem] data-[side=left]:data-starting-style:translate-x-[-2.5rem] data-[side=right]:inset-y-0 data-[side=right]:right-0 data-[side=right]:h-full data-[side=right]:w-3/4 data-[side=right]:data-ending-style:translate-x-[2.5rem] data-[side=right]:data-starting-style:translate-x-[2.5rem] data-[side=top]:inset-x-0 data-[side=top]:top-0 data-[side=top]:h-auto data-[side=top]:data-ending-style:translate-y-[-2.5rem] data-[side=top]:data-starting-style:translate-y-[-2.5rem] data-[side=left]:sm:max-w-sm data-[side=right]:sm:max-w-sm",
++					"fixed z-50 flex max-h-(--app-height) flex-col overflow-y-auto data-[side=bottom]:rounded-t-sheet data-[side=top]:rounded-b-sheet data-[side=left]:rounded-r-sheet data-[side=right]:rounded-l-sheet bg-popover bg-clip-padding text-body-medium text-popover-foreground transition duration-200 ease-in-out data-ending-style:opacity-0 data-starting-style:opacity-0 data-[side=bottom]:left-(--safe-left) data-[side=bottom]:right-(--safe-right) data-[side=bottom]:bottom-[calc(100%-var(--viewport-top)-var(--viewport-height)+var(--safe-bottom))] data-[side=bottom]:h-auto data-[side=bottom]:data-ending-style:translate-y-[2.5rem] data-[side=bottom]:data-starting-style:translate-y-[2.5rem] data-[side=left]:top-[calc(var(--viewport-top)+var(--safe-top))] data-[side=left]:left-(--safe-left) data-[side=left]:h-(--app-height) data-[side=left]:w-3/4 data-[side=left]:data-ending-style:translate-x-[-2.5rem] data-[side=left]:data-starting-style:translate-x-[-2.5rem] data-[side=right]:top-[calc(var(--viewport-top)+var(--safe-top))] data-[side=right]:right-(--safe-right) data-[side=right]:h-(--app-height) data-[side=right]:w-3/4 data-[side=right]:data-ending-style:translate-x-[2.5rem] data-[side=right]:data-starting-style:translate-x-[2.5rem] data-[side=top]:left-(--safe-left) data-[side=top]:right-(--safe-right) data-[side=top]:top-[calc(var(--viewport-top)+var(--safe-top))] data-[side=top]:h-auto data-[side=top]:data-ending-style:translate-y-[-2.5rem] data-[side=top]:data-starting-style:translate-y-[-2.5rem] data-[side=left]:sm:max-w-sm data-[side=right]:sm:max-w-sm",
+ 					className,
+ 				)}
+ 				{...props}
+diff --git a/src/components/ui/sidebar.tsx b/src/components/ui/sidebar.tsx
+index eddab2d..d23364c 100644
+--- a/src/components/ui/sidebar.tsx
++++ b/src/components/ui/sidebar.tsx
+@@ -138,7 +138,7 @@ function SidebarProvider({
+ 					} as React.CSSProperties
+ 				}
+ 				className={cn(
+-					"group/sidebar-wrapper flex min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
++					"group/sidebar-wrapper flex min-h-(--app-height) w-full has-data-[variant=inset]:bg-sidebar",
+ 					className,
+ 				)}
+ 				{...props}
+@@ -230,7 +230,7 @@ function Sidebar({
+ 				data-slot="sidebar-container"
+ 				data-side={side}
+ 				className={cn(
+-					"fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
++					"fixed inset-y-0 z-10 hidden h-(--app-height) w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
+ 					// Adjust the padding for floating and inset variants.
+ 					variant === "floating" || variant === "inset"
+ 						? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
+diff --git a/src/hooks/use-back-dismiss.ts b/src/hooks/use-back-dismiss.ts
+new file mode 100644
+index 0000000..0d7cdd8
+--- /dev/null
++++ b/src/hooks/use-back-dismiss.ts
+@@ -0,0 +1,9 @@
++import { useEffect, type RefObject } from "react"
++import { registerBackDismiss } from "@/lib/back"
++
++/** Use the component's close action so controlled state and focus stay in sync. */
++export function useBackDismiss(open: boolean, actions: RefObject<{ close: () => void } | null>) {
++	useEffect(() => {
++		if (open) return registerBackDismiss(() => actions.current?.close())
++	}, [open, actions])
++}
+diff --git a/src/hooks/use-copy.ts b/src/hooks/use-copy.ts
+index 870e31d..f33349a 100644
+--- a/src/hooks/use-copy.ts
++++ b/src/hooks/use-copy.ts
+@@ -1,4 +1,5 @@
+ import { useCallback, useEffect, useRef, useState } from "react"
++import { writeClipboard } from "@/lib/runtime"
+ 
+ /** Copies text to the clipboard. `copied` is true for a short time after. */
+ export function useCopy(timeout = 1500) {
+@@ -7,11 +8,11 @@ export function useCopy(timeout = 1500) {
+ 	useEffect(() => () => clearTimeout(timer.current), [])
+ 	const copy = useCallback(
+ 		(text: string) => {
+-			void navigator.clipboard?.writeText(text).then(() => {
++			void writeClipboard(text).then(() => {
+ 				setCopied(true)
+ 				clearTimeout(timer.current)
+ 				timer.current = setTimeout(() => setCopied(false), timeout)
+-			})
++			}).catch(() => setCopied(false))
+ 		},
+ 		[timeout],
+ 	)
+diff --git a/src/hooks/use-live-talk.ts b/src/hooks/use-live-talk.ts
+index 1a01aac..3480cad 100644
+--- a/src/hooks/use-live-talk.ts
++++ b/src/hooks/use-live-talk.ts
+@@ -2,6 +2,8 @@ import { ExecutionsApi, LiveApi } from "@openbot-build/client/Api"
+ import { Option, Schema } from "effect"
+ import { useCallback, useEffect, useRef, useState } from "react"
+ import { type Capture, Player, startCapture } from "@/lib/live-audio"
++import { apiOrigin, createWebSocket, nativeRuntime } from "@/lib/runtime"
++import { watchAppPause } from "@/lib/app-lifecycle"
+ 
+ /** What the page shows about a Live talk. */
+ export interface TalkState {
+@@ -41,7 +43,7 @@ const decodeMessage = Schema.decodeUnknownOption(
+ 
+ /** The address of the Live WebSocket of a chat, on the origin of the page. */
+ const liveUrl = (chatId: string, organization: string | undefined) => {
+-	const url = new URL(`/v1/chats/${chatId}/live`, globalThis.location.href)
++	const url = new URL(`/v1/chats/${encodeURIComponent(chatId)}/live`, apiOrigin())
+ 	url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+ 	// A browser cannot send the organization header with a WebSocket.
+ 	if (organization !== undefined)
+@@ -50,6 +52,7 @@ const liveUrl = (chatId: string, organization: string | undefined) => {
+ }
+ 
+ interface Session {
++	readonly abort: AbortController
+ 	readonly socket: WebSocket
+ 	readonly context: AudioContext
+ 	capture: Capture | undefined
+@@ -90,11 +93,13 @@ export const useLiveTalk = ({
+ 		const current = session.current
+ 		session.current = undefined
+ 		if (current !== undefined) {
++			current.abort.abort()
+ 			current.capture?.stop()
+ 			current.player?.stop()
+ 			current.socket.onclose = null
++			current.socket.onmessage = null
+ 			current.socket.close()
+-			void current.context.close()
++			void current.context.close().catch(() => {})
+ 		}
+ 		setState({ ...idle, error })
+ 	}, [])
+@@ -112,6 +117,7 @@ export const useLiveTalk = ({
+ 				void turnEnd.current()
+ 				return
+ 			case "session.ready": {
++				if (current.ready) return
+ 				if (message.audio.input.encoding !== "pcm16") {
+ 					close("This Live model does not take sound that a browser can send.")
+ 					return
+@@ -140,6 +146,7 @@ export const useLiveTalk = ({
+ 						if (!current.muted && current.socket.readyState === WebSocket.OPEN)
+ 							current.socket.send(chunk)
+ 					},
++					current.abort.signal,
+ 				).then(
+ 					(capture) => {
+ 						if (session.current === current) current.capture = capture
+@@ -200,12 +207,21 @@ export const useLiveTalk = ({
+ 
+ 	const start = useCallback(() => {
+ 		if (session.current !== undefined) return
++		if (document.visibilityState === "hidden") return
+ 		// The click starts the sound, so the browser lets it play.
+-		const context = new AudioContext()
+-		void context.resume()
+-		const socket = new WebSocket(liveUrl(chatId, organization))
++		let context: AudioContext | undefined
++		let socket: WebSocket
++		try {
++			context = new AudioContext()
++			socket = createWebSocket(liveUrl(chatId, organization))
++		} catch {
++			void context?.close().catch(() => {})
++			setState({ ...idle, error: "Live talk could not start. Check audio access and try again." })
++			return
++		}
+ 		socket.binaryType = "arraybuffer"
+ 		const current: Session = {
++			abort: new AbortController(),
+ 			socket,
+ 			context,
+ 			capture: undefined,
+@@ -217,6 +233,9 @@ export const useLiveTalk = ({
+ 		}
+ 		session.current = current
+ 		setState({ ...idle, status: "connecting" })
++		void context.resume().catch(() => {
++			if (session.current === current) close("Audio could not start. Try again.")
++		})
+ 		socket.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
+ 			if (session.current !== current) return
+ 			if (typeof event.data === "string") {
+@@ -233,7 +252,7 @@ export const useLiveTalk = ({
+ 			)
+ 			void turnEnd.current()
+ 		}
+-	}, [chatId, organization])
++	}, [chatId, organization, close])
+ 
+ 	const setMuted = useCallback(
+ 		(muted: boolean) => {
+@@ -247,8 +266,14 @@ export const useLiveTalk = ({
+ 		[patch],
+ 	)
+ 
+-	// The talk ends when the page goes away.
+-	useEffect(() => () => close(), [close])
++	// A new chat or organization must not inherit the old microphone or socket.
++	useEffect(() => {
++		const stopWatching = watchAppPause(window, close, nativeRuntime())
++		return () => {
++			stopWatching()
++			close()
++		}
++	}, [chatId, organization, close])
+ 
+ 	return {
+ 		state,
+diff --git a/src/lib/api.ts b/src/lib/api.ts
+index bb17286..85aebec 100644
+--- a/src/lib/api.ts
++++ b/src/lib/api.ts
+@@ -2,13 +2,15 @@ import { BrowserCrypto } from "@effect/platform-browser"
+ import * as OpenBot from "@openbot-build/client"
+ import { Cause, Layer, Predicate } from "effect"
+ import * as Atom from "effect/reactivity/Atom"
++import { FetchHttpClient } from "effect/http"
++import { apiOrigin, nativeRuntime, storageKey } from "@/lib/runtime"
+ 
+ /** The key in local storage that keeps the organization the person works in. */
+ const organizationKey = "openbot.organization"
+ 
+ const readOrganization = (): string | undefined => {
+ 	try {
+-		return globalThis.localStorage?.getItem(organizationKey) ?? undefined
++		return globalThis.localStorage?.getItem(storageKey(organizationKey)) ?? undefined
+ 	} catch {
+ 		return undefined
+ 	}
+@@ -22,7 +24,7 @@ export const organizationAtom = Atom.writable<string | undefined, string>(
+ 	() => readOrganization(),
+ 	(ctx, value) => {
+ 		try {
+-			globalThis.localStorage?.setItem(organizationKey, value)
++			globalThis.localStorage?.setItem(storageKey(organizationKey), value)
+ 		} catch {
+ 			// Storage can be blocked. The choice then lasts only for this page.
+ 		}
+@@ -39,20 +41,24 @@ export const goToSignIn = () => {
+ }
+ 
+ /**
+- * The runtime of every API atom. The OpenBot client runs on the same origin and
+- * uses the session cookie. When the organization changes, the runtime and the
+- * atoms that use it start again.
++ * The runtime of every API atom. Browsers use the same-origin session cookie;
++ * native shells supply an explicit API origin and transport. When the
++ * organization changes, the runtime and the atoms that use it start again.
+  */
+-export const apiRuntime = Atom.runtime((get) =>
+-	Layer.merge(
++export const apiRuntime = Atom.runtime((get) => {
++	const native = nativeRuntime()
++	const client = OpenBot.layer({
++		baseUrl: apiOrigin(),
++		organization: get(organizationAtom),
++		onUnauthorized: goToSignIn,
++	})
++	return Layer.merge(
+ 		BrowserCrypto.layer,
+-		OpenBot.layer({
+-			baseUrl: globalThis.location?.origin ?? "",
+-			organization: get(organizationAtom),
+-			onUnauthorized: goToSignIn,
+-		}),
+-	),
+-)
++		native === undefined ? client : client.pipe(
++			Layer.provide(Layer.succeed(FetchHttpClient.Fetch, native.fetch)),
++		),
++	)
++})
+ 
+ /** The typed client. Use it inside the effects of `apiRuntime` atoms. */
+ export const Api = OpenBot.Client
+diff --git a/src/lib/app-lifecycle.ts b/src/lib/app-lifecycle.ts
+new file mode 100644
+index 0000000..613b2d9
+--- /dev/null
++++ b/src/lib/app-lifecycle.ts
+@@ -0,0 +1,34 @@
++import type { NativeRuntime } from "./runtime"
++
++/** End media before the page or native activity becomes inactive. */
++export function watchAppPause(
++	window: Window,
++	pause: (error?: string) => void,
++	native?: Pick<NativeRuntime, "onAppStateChange">,
++): () => void {
++	let disposed = false
++	let unlisten: (() => void) | undefined
++	const hidden = () => {
++		if (!disposed) pause()
++	}
++	const visibility = () => {
++		if (window.document.visibilityState === "hidden") hidden()
++	}
++	window.addEventListener("pagehide", hidden)
++	window.document.addEventListener("visibilitychange", visibility)
++	void native?.onAppStateChange?.((state) => {
++		if (state === "inactive") hidden()
++	}).then((stop) => {
++		if (disposed) stop()
++		else unlisten = stop
++	}, () => {
++		if (!disposed) pause("Live talk stopped because the app state could not be read.")
++	})
++	visibility()
++	return () => {
++		disposed = true
++		window.removeEventListener("pagehide", hidden)
++		window.document.removeEventListener("visibilitychange", visibility)
++		unlisten?.()
++	}
++}
+diff --git a/src/lib/back.ts b/src/lib/back.ts
+new file mode 100644
+index 0000000..88953e2
+--- /dev/null
++++ b/src/lib/back.ts
+@@ -0,0 +1,14 @@
++const dismissals = new Set<() => void>()
++
++/** Open surfaces register in order, so Back closes only the top one. */
++export function registerBackDismiss(close: () => void): () => void {
++	dismissals.add(close)
++	return () => { dismissals.delete(close) }
++}
++
++export function consumeBackPress(): boolean {
++	const close = [...dismissals].at(-1)
++	if (!close) return false
++	close()
++	return true
++}
+diff --git a/src/lib/capture-worklet.js b/src/lib/capture-worklet.js
+new file mode 100644
+index 0000000..7e71e62
+--- /dev/null
++++ b/src/lib/capture-worklet.js
+@@ -0,0 +1,36 @@
++// The audio thread converts microphone samples to the Live PCM format.
++class Capture extends AudioWorkletProcessor {
++	constructor(options) {
++		super()
++		const target = options.processorOptions.targetRate
++		this.step = sampleRate / target
++		this.position = 0
++		this.last = 0
++		this.length = Math.max(1, Math.round(target * 0.04))
++		this.chunk = new Int16Array(this.length)
++		this.size = 0
++	}
++	process(inputs) {
++		const data = inputs[0] && inputs[0][0]
++		if (!data || data.length === 0) return true
++		let t = this.position
++		while (Math.floor(t) + 1 < data.length) {
++			const i = Math.floor(t)
++			const a = i < 0 ? this.last : data[i]
++			const b = data[i + 1]
++			const v = Math.max(-1, Math.min(1, a + (b - a) * (t - i)))
++			this.chunk[this.size++] = v < 0 ? v * 0x8000 : v * 0x7fff
++			if (this.size === this.length) {
++				// The transfer empties the old array, so a new one takes its place.
++				this.port.postMessage(this.chunk.buffer, [this.chunk.buffer])
++				this.chunk = new Int16Array(this.length)
++				this.size = 0
++			}
++			t += this.step
++		}
++		this.position = t - data.length
++		this.last = data[data.length - 1]
++		return true
++	}
++}
++registerProcessor("openbot-capture", Capture)
+diff --git a/src/lib/live-audio.ts b/src/lib/live-audio.ts
+index ea94f3c..16eec74 100644
+--- a/src/lib/live-audio.ts
++++ b/src/lib/live-audio.ts
+@@ -9,45 +9,9 @@
+  * The AudioWorklet that takes the microphone. It changes the rate to the rate
+  * of the session with linear interpolation, makes 16-bit samples, and posts
+  * about 40 ms of sound at a time. A worklet runs on the sound thread, so it
+- * comes in as text and runs from a Blob address.
++ * loads as a local build asset, without inline or Blob script access.
+  */
+-const captureWorklet = `
+-class Capture extends AudioWorkletProcessor {
+-	constructor(options) {
+-		super()
+-		const target = options.processorOptions.targetRate
+-		this.step = sampleRate / target
+-		this.position = 0
+-		this.last = 0
+-		this.length = Math.max(1, Math.round(target * 0.04))
+-		this.chunk = new Int16Array(this.length)
+-		this.size = 0
+-	}
+-	process(inputs) {
+-		const data = inputs[0] && inputs[0][0]
+-		if (!data || data.length === 0) return true
+-		let t = this.position
+-		while (Math.floor(t) + 1 < data.length) {
+-			const i = Math.floor(t)
+-			const a = i < 0 ? this.last : data[i]
+-			const b = data[i + 1]
+-			const v = Math.max(-1, Math.min(1, a + (b - a) * (t - i)))
+-			this.chunk[this.size++] = v < 0 ? v * 0x8000 : v * 0x7fff
+-			if (this.size === this.length) {
+-				// The transfer empties the old array, so a new one takes its place.
+-				this.port.postMessage(this.chunk.buffer, [this.chunk.buffer])
+-				this.chunk = new Int16Array(this.length)
+-				this.size = 0
+-			}
+-			t += this.step
+-		}
+-		this.position = t - data.length
+-		this.last = data[data.length - 1]
+-		return true
+-	}
+-}
+-registerProcessor("openbot-capture", Capture)
+-`
++
+ 
+ /** The microphone, as 16-bit sound at `targetRate`. Call `stop` to let it go. */
+ export interface Capture {
+@@ -62,7 +26,9 @@ export const startCapture = async (
+ 	context: AudioContext,
+ 	targetRate: number,
+ 	onChunk: (chunk: ArrayBuffer) => void,
++	signal?: AbortSignal,
+ ): Promise<Capture> => {
++	signal?.throwIfAborted()
+ 	const stream = await navigator.mediaDevices.getUserMedia({
+ 		audio: {
+ 			channelCount: 1,
+@@ -71,17 +37,31 @@ export const startCapture = async (
+ 			autoGainControl: true,
+ 		},
+ 	})
++	let source: MediaStreamAudioSourceNode | undefined
++	let node: AudioWorkletNode | undefined
++	let stopped = false
++	const stop = () => {
++		if (stopped) return
++		stopped = true
++		signal?.removeEventListener("abort", stop)
++		for (const track of stream.getTracks()) track.stop()
++		if (node) {
++			node.port.onmessage = null
++			node.port.close()
++			node.disconnect()
++		}
++		source?.disconnect()
++	}
++	signal?.addEventListener("abort", stop, { once: true })
+ 	try {
+-		const url = URL.createObjectURL(
+-			new Blob([captureWorklet], { type: "text/javascript" }),
++		// getUserMedia cannot cancel its permission prompt. Drop a late grant.
++		signal?.throwIfAborted()
++		await context.audioWorklet.addModule(
++			new URL("./capture-worklet.js?no-inline", import.meta.url).href,
+ 		)
+-		try {
+-			await context.audioWorklet.addModule(url)
+-		} finally {
+-			URL.revokeObjectURL(url)
+-		}
+-		const source = context.createMediaStreamSource(stream)
+-		const node = new AudioWorkletNode(context, "openbot-capture", {
++		signal?.throwIfAborted()
++		source = context.createMediaStreamSource(stream)
++		node = new AudioWorkletNode(context, "openbot-capture", {
+ 			numberOfInputs: 1,
+ 			numberOfOutputs: 1,
+ 			channelCount: 1,
+@@ -94,16 +74,9 @@ export const startCapture = async (
+ 		// The browser runs only the nodes that lead to the speakers. The worklet
+ 		// writes no sound to its output, so this plays only silence.
+ 		node.connect(context.destination)
+-		return {
+-			stop: () => {
+-				node.port.onmessage = null
+-				source.disconnect()
+-				node.disconnect()
+-				for (const track of stream.getTracks()) track.stop()
+-			},
+-		}
++		return { stop }
+ 	} catch (error) {
+-		for (const track of stream.getTracks()) track.stop()
++		stop()
+ 		throw error
+ 	}
+ }
+@@ -113,6 +86,9 @@ export const startCapture = async (
+  * one ends. `stop` ends the sound at once, such as when the person talks.
+  */
+ export class Player {
++	private readonly context: AudioContext
++	private readonly rate: number
++	private readonly onSpeaking: (speaking: boolean) => void
+ 	private next = 0
+ 	private readonly sources = new Set<AudioBufferSourceNode>()
+ 	/** One odd byte that waits for the next piece. */
+@@ -121,10 +97,14 @@ export class Player {
+ 	private itemStart: number | undefined
+ 
+ 	constructor(
+-		private readonly context: AudioContext,
+-		private readonly rate: number,
+-		private readonly onSpeaking: (speaking: boolean) => void,
+-	) {}
++		context: AudioContext,
++		rate: number,
++		onSpeaking: (speaking: boolean) => void,
++	) {
++		this.context = context
++		this.rate = rate
++		this.onSpeaking = onSpeaking
++	}
+ 
+ 	play(bytes: ArrayBuffer) {
+ 		let view = new Uint8Array(bytes)
+diff --git a/src/lib/runtime.ts b/src/lib/runtime.ts
+new file mode 100644
+index 0000000..33a9bb5
+--- /dev/null
++++ b/src/lib/runtime.ts
+@@ -0,0 +1,130 @@
++/** The public boundary between the shared Web app and a native shell. */
++export interface NativeRuntime {
++	readonly version: 1
++	readonly kind: "native"
++	readonly apiOrigin: string
++	readonly development?: boolean
++	readonly developmentSignIn?: boolean
++	/** Native fetch accepts the email-code session and keeps its cookie private. */
++	readonly emailSignIn?: boolean
++	readonly session?: {
++		readonly persistence: "none" | "saved" | "memory"
++		readonly issue?: "browser-sign-in-incomplete" | "store-unavailable" | "service-unavailable" | "invalid-saved-sign-in" | "not-saved" | "cleanup-pending" | "sign-out-incomplete"
++		readonly retry: () => Promise<void>
++	}
++	readonly storageNamespace?: string
++	readonly connection?: {
++		readonly defaultOrigin: string
++		/** Block normal app setup until the user repairs or re-reads settings. */
++		readonly recovery?: "invalid-settings" | "unsupported-version" | "unreadable-settings"
++		readonly retry?: () => Promise<void>
++		/** Save the selection, cancel old requests, then reload the app. */
++		readonly change: (origin: string | null) => Promise<void>
++	}
++	/** Fetch keeps native credentials in the shell and supports abort and streams. */
++	readonly fetch: typeof globalThis.fetch
++	/** Resolve only after the new native session is ready for API calls. */
++	readonly signIn: (input: {
++		readonly email?: string
++		readonly returnTo?: string
++		readonly invitation?: string
++	}) => Promise<void>
++    /** The shell opens the system browser and owns all grant values. */
++    readonly browserSignIn?: (input: {
++        readonly email?: string
++        readonly invitation?: string
++        readonly returnTo?: string
++        readonly signal?: AbortSignal
++    }) => Promise<void>
++	readonly signOut: () => Promise<void>
++	readonly writeClipboard: (text: string) => Promise<void>
++	readonly openExternal: (url: string) => Promise<void>
++	readonly createWebSocket: (url: string) => WebSocket
++	/** Return true to consume Android back, before native history or app exit. */
++	readonly onBackPress?: (handler: () => boolean) => Promise<() => void>
++	/** Mobile OS activity changes. Resuming never starts a new talk by itself. */
++	readonly onAppStateChange?: (handler: (state: "active" | "inactive") => void) => Promise<() => void>
++}
++
++declare global {
++	var __OPENBOT_RUNTIME__: NativeRuntime | undefined
++}
++
++/** Install once, before the shared app starts. This module starts no I/O. */
++export function installRuntime(runtime: NativeRuntime): void {
++	if (globalThis.__OPENBOT_RUNTIME__ !== undefined)
++		throw new Error("The app runtime is already set.")
++	if (runtime.version !== 1 || runtime.kind !== "native")
++		throw new Error("The app runtime version is not supported.")
++	const origin = new URL(normalizeServiceOrigin(runtime.apiOrigin, runtime.development))
++	if (
++		origin.origin !== runtime.apiOrigin ||
++		origin.username !== "" ||
++		origin.password !== ""
++	)
++		throw new Error("The API needs an HTTPS origin without a path or credentials.")
++	for (const name of [
++		"fetch", "signIn", "signOut", "writeClipboard", "openExternal", "createWebSocket",
++	] as const)
++		if (typeof runtime[name] !== "function")
++			throw new Error(`The app runtime has no ${name} action.`)
++    if (runtime.browserSignIn !== undefined && typeof runtime.browserSignIn !== "function")
++        throw new Error("The browser sign-in action is not valid.")
++	Object.defineProperty(globalThis, "__OPENBOT_RUNTIME__", {
++		value: Object.freeze({ ...runtime }),
++		writable: false,
++		configurable: false,
++	})
++}
++
++/** Browser callers have no native dependency or import-time setup. */
++export const nativeRuntime = (): NativeRuntime | undefined =>
++	globalThis.__OPENBOT_RUNTIME__
++
++export const apiOrigin = (): string =>
++	nativeRuntime()?.apiOrigin ?? globalThis.location?.origin ?? ""
++
++/** Native requests use the shell's API and file-storage origin checks. */
++export const fetchResource: typeof globalThis.fetch = (input, init) =>
++	(nativeRuntime()?.fetch ?? globalThis.fetch)(input, init)
++
++export function storageKey(name: string): string {
++	const namespace = nativeRuntime()?.storageNamespace
++	return namespace ? `${namespace}.${name}` : name
++}
++
++/** Only local development can use cleartext HTTP. Native Rust checks it again. */
++export function normalizeServiceOrigin(input: string, development = false): string {
++	const url = new URL(input.trim())
++	const loopback = url.hostname === "localhost" || url.hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(url.hostname)
++	if ((url.protocol !== "https:" && !(development && url.protocol === "http:" && loopback)) || url.username || url.password || url.href !== `${url.origin}/`)
++		throw new Error("Use an HTTPS service address without a path. Local HTTP is allowed only during development.")
++	return url.origin
++}
++
++export const writeClipboard = (text: string): Promise<void> => {
++	const native = nativeRuntime()
++	if (native !== undefined) return native.writeClipboard(text)
++	if (globalThis.navigator?.clipboard === undefined)
++		return Promise.reject(new Error("The clipboard is not available."))
++	return globalThis.navigator.clipboard.writeText(text)
++}
++
++/** A WebSocket transport can live in Rust; the UI uses its WebSocket surface. */
++export const createWebSocket = (url: string): WebSocket =>
++	nativeRuntime()?.createWebSocket(url) ?? new WebSocket(url)
++
++export function externalUrl(input: string): string {
++	const url = new URL(input)
++	if (url.protocol !== "https:" || url.username !== "" || url.password !== "")
++		throw new Error("This external link is not an HTTPS address.")
++	return url.href
++}
++
++/** Return paths can never send a login result to a different origin. */
++export function returnPath(input: string | null | undefined): string {
++	if (!input?.startsWith("/") || input.startsWith("//") || /[\\\u0000-\u001f]/.test(input))
++		return "/"
++	const url = new URL(input, "https://return.invalid")
++	return url.origin === "https://return.invalid" ? url.pathname + url.search + url.hash : "/"
++}
+diff --git a/src/lib/viewport.ts b/src/lib/viewport.ts
+new file mode 100644
+index 0000000..835aa53
+--- /dev/null
++++ b/src/lib/viewport.ts
+@@ -0,0 +1,27 @@
++/** Keep the app and its portals above the software keyboard. Zoom stays native. */
++export function watchViewport(window: Window): () => void {
++	const viewport = window.visualViewport
++	const style = window.document.documentElement.style
++	let frame = 0
++	const update = () => {
++		frame = 0
++		if (viewport && Math.abs(viewport.scale - 1) > 0.01) return
++		style.setProperty("--viewport-height", `${viewport?.height ?? window.innerHeight}px`)
++		style.setProperty("--viewport-top", `${viewport?.offsetTop ?? 0}px`)
++	}
++	const schedule = () => {
++		if (!frame) frame = window.requestAnimationFrame(update)
++	}
++	update()
++	window.addEventListener("resize", schedule)
++	viewport?.addEventListener("resize", schedule)
++	viewport?.addEventListener("scroll", schedule)
++	return () => {
++		window.cancelAnimationFrame(frame)
++		window.removeEventListener("resize", schedule)
++		viewport?.removeEventListener("resize", schedule)
++		viewport?.removeEventListener("scroll", schedule)
++		style.removeProperty("--viewport-height")
++		style.removeProperty("--viewport-top")
++	}
++}
+diff --git a/src/main.tsx b/src/main.tsx
+index 95740af..79568cd 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -1,23 +1,47 @@
+ import { RegistryProvider } from "@effect/atom-react"
+-import { StrictMode } from "react"
++import { StrictMode, useEffect } from "react"
++import { toast } from "sonner"
+ import { createRoot } from "react-dom/client"
+ import { RouterProvider } from "react-router"
+ import { Toaster } from "@/components/ui/sonner"
+ import { TooltipProvider } from "@/components/ui/tooltip"
+ import { router } from "@/router"
++import { watchViewport } from "@/lib/viewport"
++import { consumeBackPress } from "@/lib/back"
++import { nativeRuntime } from "@/lib/runtime"
++import { ConnectionGate } from "@/components/app/ConnectionSettings"
+ import { ThemeSync } from "@/components/app/ThemeSync"
+ import "./styles.css"
+ 
++function NativeSessionFeedback() {
++	useEffect(() => {
++		const session = nativeRuntime()?.session
++		if (session?.issue !== "not-saved") return
++		toast.warning("Your device could not remember this sign-in. You may need to sign in again after closing the app.", {
++			id: "native-session-not-saved",
++			duration: Infinity,
++			action: { label: "Retry", onClick: () => { void session.retry().catch(() => toast.error("The saved sign-in could not be updated.")) } },
++		})
++	}, [])
++	return null
++}
++
+ const root = document.getElementById("root")
+ if (root === null) throw new Error("The page has no root element.")
++const stopViewport = watchViewport(window)
++if (import.meta.hot) import.meta.hot.dispose(stopViewport)
++const backListener = nativeRuntime()?.onBackPress?.(consumeBackPress)
++backListener?.catch((error: unknown) => console.error("Could not set up the Back button.", error))
++if (import.meta.hot) import.meta.hot.dispose(() => { void backListener?.then((stop) => stop()) })
+ 
+ createRoot(root).render(
+ 	<StrictMode>
+ 		<RegistryProvider>
+ 			<ThemeSync />
+ 			<TooltipProvider>
+-				<RouterProvider router={router} />
++				<ConnectionGate><RouterProvider router={router} /></ConnectionGate>
+ 				<Toaster position="top-center" />
++				<NativeSessionFeedback />
+ 			</TooltipProvider>
+ 		</RegistryProvider>
+ 	</StrictMode>,
+diff --git a/src/pages/AppLayout.tsx b/src/pages/AppLayout.tsx
+index 6a1c099..6076a48 100644
+--- a/src/pages/AppLayout.tsx
++++ b/src/pages/AppLayout.tsx
+@@ -22,8 +22,9 @@ import {
+ import { Input } from "@/components/ui/input"
+ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
+ import { Spinner } from "@/components/ui/spinner"
+-import { accountAtom, createOrganizationAtom } from "@/atoms/account"
++import { accountAtom, createOrganizationAtom, signOut } from "@/atoms/account"
+ import { AppSidebar } from "@/components/app/AppSidebar"
++import { ConnectionSettings } from "@/components/app/ConnectionSettings"
+ import { SearchDialog } from "@/components/app/SearchDialog"
+ import { SettingsDialog } from "@/components/app/SettingsDialog"
+ import { Shortcuts } from "@/components/app/Shortcuts"
+@@ -75,7 +76,7 @@ export function AppLayout() {
+ 				/>
+ 			)
+ 		return (
+-			<Empty className="min-h-svh">
++			<Empty className="min-h-(--app-height)">
+ 				<EmptyHeader>
+ 					<EmptyTitle>OpenBot is not reachable</EmptyTitle>
+ 					<EmptyDescription>{errorMessage(account.cause)}</EmptyDescription>
+@@ -84,6 +85,7 @@ export function AppLayout() {
+ 					<Button onClick={() => globalThis.location.reload()}>
+ 						Try again
+ 					</Button>
++					<ConnectionSettings />
+ 				</EmptyContent>
+ 			</Empty>
+ 		)
+@@ -106,7 +108,7 @@ export function AppLayout() {
+ 
+ function FullPageSpinner() {
+ 	return (
+-		<div className="flex min-h-svh items-center justify-center">
++		<div className="flex min-h-(--app-height) items-center justify-center">
+ 			<Spinner className="size-6 text-muted-foreground" />
+ 		</div>
+ 	)
+@@ -122,7 +124,7 @@ function NoOrganization() {
+ 	const [name, setName] = useState("")
+ 	const [busy, setBusy] = useState(false)
+ 	return (
+-		<Empty className="min-h-svh">
++		<Empty className="min-h-(--app-height)">
+ 			<EmptyHeader>
+ 				<EmptyMedia variant="icon">
+ 					<Building2Icon />
+@@ -161,6 +163,12 @@ function NoOrganization() {
+ 				)}
+ 				<InvitationList />
+ 				{admin && <Link to="/admin">Platform administration</Link>}
++				<ConnectionSettings />
++				<Button variant="ghost" disabled={busy} onClick={() => {
++					setBusy(true)
++					void signOut().catch((cause: unknown) => toast.error(errorMessage(cause)))
++						.finally(() => setBusy(false))
++				}}>Sign out</Button>
+ 			</EmptyContent>
+ 		</Empty>
+ 	)
+diff --git a/src/pages/NotFoundPage.tsx b/src/pages/NotFoundPage.tsx
+index b8512d5..6e8c682 100644
+--- a/src/pages/NotFoundPage.tsx
++++ b/src/pages/NotFoundPage.tsx
+@@ -13,7 +13,7 @@ import {
+ /** The page for an address that the app does not know. */
+ export function NotFoundPage() {
+ 	return (
+-		<Empty className="min-h-svh">
++		<Empty className="min-h-(--app-height)">
+ 			<EmptyHeader>
+ 				<EmptyMedia variant="icon">
+ 					<FileQuestionIcon />
+diff --git a/src/pages/SignInPage.tsx b/src/pages/SignInPage.tsx
+index 1321dfa..9fca129 100644
+--- a/src/pages/SignInPage.tsx
++++ b/src/pages/SignInPage.tsx
+@@ -1,6 +1,6 @@
+ import { loginOptionsAtom, sendCodeAtom, verifyCodeAtom } from "@/atoms/access"
+ import { useAtomSet, useAtomValue } from "@effect/atom-react"
+-import { useState } from "react"
++import { useEffect, useRef, useState } from "react"
+ import { useSearchParams } from "react-router"
+ import { toast } from "sonner"
+ import { Button } from "@/components/ui/button"
+@@ -24,9 +24,12 @@ import { Logo } from "@/components/app/Logo"
+ import { errorMessage } from "@/lib/api"
+ 
+ import { safeReturn } from "@/lib/returnTo"
++import { nativeRuntime } from "@/lib/runtime"
++import { ConnectionSettings, NativeSessionNotice } from "@/components/app/ConnectionSettings"
+ 
+ /** The sign-in page. OpenBot finds the sign-in provider from the email. */
+ export function SignInPage() {
++	const native = nativeRuntime()
+ 	const [params] = useSearchParams()
+ 	const returnTo = safeReturn(params.get("returnTo"))
+     const options = useAtomValue(loginOptionsAtom)
+@@ -40,19 +43,49 @@ export function SignInPage() {
+ 	const signIn = useAtomSet(signInAtom, { mode: "promise" })
+ 	const [email, setEmail] = useState("")
+ 	const [busy, setBusy] = useState(false)
++    const browserController = useRef<AbortController | null>(null)
++    const [browserBusy, setBrowserBusy] = useState(false)
++    const [cancelling, setCancelling] = useState(false)
++    useEffect(() => () => browserController.current?.abort(), [])
++
+     const [challenge, setChallenge] = useState<string>()
+     const [code, setCode] = useState("")
+     const sendCode = useAtomSet(sendCodeAtom, { mode: "promise" })
+     const verifyCode = useAtomSet(verifyCodeAtom, { mode: "promise" })
+-    const emailReady = options._tag === "Success" && options.value.emailSignIn
+-    const oidcReady = options._tag === "Success" && options.value.oidc
++    const emailReady = options._tag === "Success" && options.value.emailSignIn && (!native || native.emailSignIn === true)
++    const localSignIn = native?.developmentSignIn === true && !emailReady
++    const oidcReady = options._tag === "Success" && options.value.oidc && (!native || native.browserSignIn !== undefined)
+ 	const fail = (cause: unknown) => {
+ 		toast.error(errorMessage(cause))
+ 		setBusy(false)
+ 	}
+ 
++    const startCompanySignIn = () => {
++        if (browserController.current) return
++        if (!native) {
++            setBusy(true)
++            signIn({ email: email.trim() || undefined, returnTo, invitation }).catch(fail)
++            return
++        }
++        const controller = new AbortController()
++        browserController.current = controller
++        setBusy(true)
++        setBrowserBusy(true)
++        setCancelling(false)
++        signIn({ email: email.trim() || undefined, returnTo, invitation, browser: true, signal: controller.signal })
++            .catch(cause => {
++                if (errorMessage(cause) === "Sign-in was cancelled.") setBusy(false)
++                else fail(cause)
++            })
++            .finally(() => {
++                if (browserController.current === controller) browserController.current = null
++                setBrowserBusy(false)
++                setCancelling(false)
++            })
++    }
++
+ 	return (
+-		<main className="flex min-h-svh flex-col items-center justify-center gap-8 bg-background p-4">
++		<main className="flex min-h-(--app-height) flex-col items-center justify-center gap-8 bg-background p-4">
+ 			<div className="flex items-center gap-2.5 text-headline-small">
+ 				<Logo />
+ 			</div>
+@@ -61,26 +94,28 @@ export function SignInPage() {
+ 					<CardTitle className="text-title-large">Welcome</CardTitle>
+ 				</CardHeader>
+ 				<CardContent>
+-                    {notice && <p role="status" className="mb-5 rounded-xl bg-muted p-4 text-body-medium">{notice}</p>}
++                    <NativeSessionNotice />
++                    {!localSignIn && notice && <p role="status" className="mb-5 rounded-xl bg-muted p-4 text-body-medium">{notice}</p>}
+ 					<form
+ 						onSubmit={(event) => {
+ 							event.preventDefault()
+ 							setBusy(true)
+-							if (emailReady) {
+-                                if (challenge) verifyCode({ challenge, code }).then(() => globalThis.location.assign(returnTo), fail)
++							if (localSignIn) signIn({ returnTo }).catch(fail)
++                            else if (emailReady) {
++                                if (challenge) verifyCode({ challenge, code }).then(() => native ? globalThis.location.replace(returnTo) : globalThis.location.assign(returnTo), fail)
+                                 else sendCode({ email: email.trim(), ...(invitation ? { invitation } : {}) }).then(result => { setChallenge(result.challenge); setBusy(false) }, fail)
+-                            } else signIn({ email: email.trim() || undefined, returnTo, invitation }).catch(fail)
++                            } else startCompanySignIn()
+ 						}}
+ 					>
+ 						<FieldGroup>
+-							<Field>
++							{!localSignIn || oidcReady ? <Field data-disabled={busy || challenge !== undefined}>
+ 								<FieldLabel htmlFor="email">Email</FieldLabel>
+ 								<Input
+ 									id="email"
+ 									type="email"
+ 									autoComplete="email"
+                                     required={emailReady}
+-                                    disabled={challenge !== undefined}
++                                    disabled={busy || challenge !== undefined}
+ 									value={email}
+ 									onChange={(event) => setEmail(event.target.value)}
+ 									placeholder="you@example.com"
+@@ -88,15 +123,16 @@ export function SignInPage() {
+ 								<FieldDescription>
+ 									{emailReady ? "We send a sign-in code to this email." : "Your organization may use its own sign-in. We find it from your email."}
+ 								</FieldDescription>
+-							</Field>
++							</Field> : null}
+ 							<Field>
+ 								{challenge && <Field><FieldLabel htmlFor="code">Email code</FieldLabel><Input id="code" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{8}" maxLength={8} required value={code} onChange={e => setCode(e.target.value)} /><FieldDescription>Enter the 8-digit code. It ends in 5 minutes and can be used once.</FieldDescription></Field>}
+-                                <Button type="submit" size="lg" disabled={busy || (!emailReady && !oidcReady)}>{busy ? <Spinner /> : null} {emailReady ? challenge ? "Sign in" : "Send email code" : "Continue"}</Button>
++                                <Button type="submit" size="lg" disabled={busy || (!localSignIn && !emailReady && !oidcReady)}>{busy && (!browserBusy || (!localSignIn && !emailReady)) ? <Spinner data-icon="inline-start" /> : null} {localSignIn ? "Sign in to the test account" : emailReady ? challenge ? "Sign in" : "Send email code" : "Continue"}</Button>
+                                 {challenge && <Button type="button" variant="ghost" disabled={busy} onClick={() => { setChallenge(undefined); setCode("") }}>Use another email or send a new code</Button>}
+-                                {emailReady && oidcReady && <Button type="button" variant="secondary" disabled={busy} onClick={() => { setBusy(true); signIn({ email: email.trim() || undefined, returnTo, invitation }).catch(fail) }}>Use company sign-in</Button>}
+-                                {options._tag === "Success" && !emailReady && !oidcReady && <p role="status">Sign-in is not set up yet. Contact your administrator.</p>}
++                                {(localSignIn || emailReady) && oidcReady && <Button type="button" variant="secondary" disabled={busy} onClick={startCompanySignIn}>{browserBusy ? <Spinner data-icon="inline-start" /> : null}Use company sign-in</Button>}
++                                {browserBusy && <><FieldDescription role="status">Continue in your browser.</FieldDescription><Button type="button" variant="ghost" disabled={cancelling} onClick={() => { setCancelling(true); browserController.current?.abort() }}>{cancelling ? "Canceling…" : "Cancel sign-in"}</Button></>}
++                                {options._tag === "Success" && !localSignIn && !emailReady && !oidcReady && <p role="status">{native && options.value.oidc ? "Company sign-in is not available in this app yet." : native && options.value.emailSignIn ? "Update this app to use email sign-in." : "Sign-in is not set up yet. Contact your administrator."}</p>}
+ 							</Field>
+-							{import.meta.env.DEV ? (
++							{import.meta.env.DEV && !native ? (
+ 								<>
+ 									<FieldSeparator>Development</FieldSeparator>
+ 									<Field>
+@@ -119,6 +155,7 @@ export function SignInPage() {
+ 					</form>
+ 				</CardContent>
+ 			</Card>
++			<ConnectionSettings />
+ 		</main>
+ 	)
+ }
+diff --git a/src/styles.css b/src/styles.css
+index 2432d11..303b97c 100644
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -155,8 +155,8 @@
+ /* Rounded controls in a panel inherit its inner corner size. */
+ /* Every modal keeps the same frame as its content changes. */
+ @utility dialog-frame {
+-	width: min(var(--dialog-width), calc(100dvw - 2rem));
+-	height: min(var(--dialog-height), calc(100dvh - 2rem));
++	width: min(var(--dialog-width), calc(100dvw - 2rem - var(--safe-left) - var(--safe-right)));
++	height: min(var(--dialog-height), calc(var(--app-height) - 2rem));
+ }
+ 
+ @utility nested-controls {
+@@ -273,6 +273,15 @@
+ }
+ 
+ :root {
++	--viewport-height: 100dvh;
++	--viewport-top: 0px;
++	--safe-top: env(safe-area-inset-top, 0px);
++	--safe-right: env(safe-area-inset-right, 0px);
++	--safe-bottom: env(safe-area-inset-bottom, 0px);
++	--safe-left: env(safe-area-inset-left, 0px);
++	--app-height: max(0px, calc(var(--viewport-height) - var(--safe-top) - var(--safe-bottom)));
++	--dialog-top: calc(var(--viewport-top) + var(--safe-top) + var(--app-height) / 2);
++	--dialog-left: calc(50% + (var(--safe-left) - var(--safe-right)) / 2);
+ 	--background: oklch(1 0 0);
+ 	--foreground: oklch(0.145 0 0);
+ 	--card: oklch(0.97 0 0);
+@@ -365,6 +374,9 @@
+ 	body {
+ 		@apply bg-background text-foreground text-body-large;
+ 	}
++	#root {
++		padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
++	}
+ 	button:not(:disabled),
+ 	[role="button"]:not(:disabled) {
+ 		cursor: pointer;
+@@ -431,10 +443,12 @@
+ /* The quiet outer frame gives the conversation its own surface. */
+ @layer components {
+   .app-shell {
+-    @apply h-svh min-h-0 bg-sidebar;
++    @apply min-h-0 bg-sidebar;
++    height: var(--app-height);
+   }
+   .app-canvas {
+-    @apply h-svh rounded-none;
++    @apply rounded-none;
++    height: var(--app-height);
+   }
+   .home-composer {
+     @apply min-h-44;
+@@ -442,7 +456,7 @@
+   @media (min-width: 768px) {
+     .app-canvas {
+       @apply my-3 mr-3 ml-0 rounded-screen;
+-      height: calc(100svh - 1.5rem);
++      height: calc(var(--app-height) - 1.5rem);
+     }
+   }
+   @media (prefers-reduced-motion: no-preference) {
+diff --git a/test/app-lifecycle.test.ts b/test/app-lifecycle.test.ts
+new file mode 100644
+index 0000000..cafd6d4
+--- /dev/null
++++ b/test/app-lifecycle.test.ts
+@@ -0,0 +1,65 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { watchAppPause } from "../src/lib/app-lifecycle.ts"
++
++const target = () => Object.assign(new EventTarget(), {
++	document: Object.assign(new EventTarget(), { visibilityState: "visible" }),
++})
++
++test("page and native pause stop a talk, while resume never starts one", async () => {
++	const window = target()
++	const stops: (string | undefined)[] = []
++	let notify!: (state: "active" | "inactive") => void
++	let removed = 0
++	const dispose = watchAppPause(window as unknown as Window, error => stops.push(error), {
++		onAppStateChange: async handler => { notify = handler; return () => { removed++ } },
++	})
++	await Promise.resolve()
++	window.document.dispatchEvent(new Event("visibilitychange"))
++	assert.equal(stops.length, 0)
++	window.document.visibilityState = "hidden"
++	window.document.dispatchEvent(new Event("visibilitychange"))
++	window.dispatchEvent(new Event("pagehide"))
++	notify("inactive")
++	assert.equal(stops.length, 3)
++	notify("active")
++	assert.equal(stops.length, 3)
++	dispose()
++	assert.equal(removed, 1)
++	window.dispatchEvent(new Event("pagehide"))
++	notify("inactive")
++	assert.equal(stops.length, 3)
++})
++
++test("a native listener that finishes after unmount is removed and cannot stop the next talk", async () => {
++	const window = target()
++	let notify!: (state: "active" | "inactive") => void
++	let registered!: (stop: () => void) => void
++	let stops = 0
++	let removed = 0
++	const dispose = watchAppPause(window as unknown as Window, () => { stops++ }, {
++		onAppStateChange: handler => {
++			notify = handler
++			return new Promise(resolve => { registered = resolve })
++		},
++	})
++	dispose()
++	registered(() => { removed++ })
++	await Promise.resolve()
++	notify("inactive")
++	assert.equal(stops, 0)
++	assert.equal(removed, 1)
++})
++
++test("an already hidden page and a failed native subscription end the talk", async () => {
++	const window = target()
++	window.document.visibilityState = "hidden"
++	const errors: (string | undefined)[] = []
++	const dispose = watchAppPause(window as unknown as Window, error => errors.push(error), {
++		onAppStateChange: async () => { throw new Error("No listener") },
++	})
++	assert.deepEqual(errors, [undefined])
++	await Promise.resolve()
++	assert.match(errors[1]!, /app state/)
++	dispose()
++})
+diff --git a/test/back.test.ts b/test/back.test.ts
+new file mode 100644
+index 0000000..84face2
+--- /dev/null
++++ b/test/back.test.ts
+@@ -0,0 +1,18 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { consumeBackPress, registerBackDismiss } from "../src/lib/back.ts"
++
++test("Back closes the last open surface before route history", () => {
++	const closed: string[] = []
++	assert.equal(consumeBackPress(), false)
++	const removeSheet = registerBackDismiss(() => closed.push("sheet"))
++	const removeDialog = registerBackDismiss(() => closed.push("dialog"))
++	assert.equal(consumeBackPress(), true)
++	assert.deepEqual(closed, ["dialog"])
++	removeDialog()
++	assert.equal(consumeBackPress(), true)
++	assert.deepEqual(closed, ["dialog", "sheet"])
++	removeSheet()
++	removeSheet()
++	assert.equal(consumeBackPress(), false)
++})
+diff --git a/test/live-audio.test.ts b/test/live-audio.test.ts
+new file mode 100644
+index 0000000..e6558fb
+--- /dev/null
++++ b/test/live-audio.test.ts
+@@ -0,0 +1,100 @@
++import assert from "node:assert/strict"
++import { test, type TestContext } from "node:test"
++import { startCapture } from "../src/lib/live-audio.ts"
++
++function deferred<T>() {
++	let resolve!: (value: T) => void
++	let reject!: (error: unknown) => void
++	const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
++	return { promise, resolve, reject }
++}
++
++function media(t: TestContext, getUserMedia: () => Promise<MediaStream>) {
++	const descriptor = Object.getOwnPropertyDescriptor(globalThis.navigator, "mediaDevices")
++	Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia }, configurable: true })
++	t.after(() => {
++		if (descriptor) Object.defineProperty(globalThis.navigator, "mediaDevices", descriptor)
++		else Reflect.deleteProperty(globalThis.navigator, "mediaDevices")
++	})
++}
++
++function stream() {
++	let stops = 0
++	return {
++		value: { getTracks: () => [{ stop: () => { stops++ } }] } as unknown as MediaStream,
++		stops: () => stops,
++	}
++}
++
++test("a canceled capture does not ask for a microphone, and a late grant is stopped", async t => {
++	const grant = deferred<MediaStream>()
++	let prompts = 0
++	media(t, () => { prompts++; return grant.promise })
++	const cancel = new AbortController()
++	cancel.abort()
++	await assert.rejects(startCapture({} as AudioContext, 24000, () => {}, cancel.signal), { name: "AbortError" })
++	assert.equal(prompts, 0)
++	const pending = new AbortController()
++	const capture = startCapture({} as AudioContext, 24000, () => {}, pending.signal)
++	pending.abort()
++	const input = stream()
++	grant.resolve(input.value)
++	await assert.rejects(capture, { name: "AbortError" })
++	assert.equal(prompts, 1)
++	assert.equal(input.stops(), 1)
++})
++
++test("cancel releases microphone tracks while the worklet module is still loading", async t => {
++	const input = stream()
++	media(t, async () => input.value)
++	const loading = deferred<void>()
++	const entered = deferred<void>()
++	const context = { audioWorklet: { addModule: () => { entered.resolve(); return loading.promise } } } as unknown as AudioContext
++	const cancel = new AbortController()
++	const capture = startCapture(context, 24000, () => {}, cancel.signal)
++	await entered.promise
++	cancel.abort()
++	assert.equal(input.stops(), 1)
++	loading.resolve()
++	await assert.rejects(capture, { name: "AbortError" })
++	assert.equal(input.stops(), 1)
++})
++
++test("worklet failure releases the microphone", async t => {
++	const input = stream()
++	media(t, async () => input.value)
++	const context = { audioWorklet: { addModule: async () => { throw new Error("Worklet failed") } } } as unknown as AudioContext
++	await assert.rejects(startCapture(context, 24000, () => {}), /Worklet failed/)
++	assert.equal(input.stops(), 1)
++})
++
++test("an active capture closes its port, nodes, and tracks once on cancel", async t => {
++	const input = stream()
++	media(t, async () => input.value)
++	let ports = 0, nodes = 0, sources = 0, chunks = 0
++	const port = { onmessage: null as null | ((event: { data: ArrayBuffer }) => void), close: () => { ports++ } }
++	const descriptor = Object.getOwnPropertyDescriptor(globalThis, "AudioWorkletNode")
++	Object.defineProperty(globalThis, "AudioWorkletNode", { configurable: true, value: class {
++		port = port
++		connect() {}
++		disconnect() { nodes++ }
++	} })
++	t.after(() => {
++		if (descriptor) Object.defineProperty(globalThis, "AudioWorkletNode", descriptor)
++		else Reflect.deleteProperty(globalThis, "AudioWorkletNode")
++	})
++	const context = {
++		audioWorklet: { addModule: async () => {} },
++		createMediaStreamSource: () => ({ connect() {}, disconnect() { sources++ } }),
++		destination: {},
++	} as unknown as AudioContext
++	const cancel = new AbortController()
++	const capture = await startCapture(context, 24000, () => { chunks++ }, cancel.signal)
++	port.onmessage?.({ data: new ArrayBuffer(2) })
++	assert.equal(chunks, 1)
++	cancel.abort()
++	capture.stop()
++	assert.equal(input.stops(), 1)
++	assert.deepEqual({ ports, nodes, sources }, { ports: 1, nodes: 1, sources: 1 })
++	assert.equal(port.onmessage, null)
++})
+diff --git a/test/native-files.test.ts b/test/native-files.test.ts
+new file mode 100644
+index 0000000..081eb97
+--- /dev/null
++++ b/test/native-files.test.ts
+@@ -0,0 +1,77 @@
++import assert from "node:assert/strict"
++import { registerHooks } from "node:module"
++import { after, test } from "node:test"
++import * as AsyncResult from "effect/reactivity/AsyncResult"
++import * as AtomRegistry from "effect/reactivity/AtomRegistry"
++import { installRuntime } from "../src/lib/runtime.ts"
++
++const hooks = registerHooks({
++	resolve(specifier, context, nextResolve) {
++		return nextResolve(specifier.startsWith("@/")
++			? new URL(`../src/${specifier.slice(2)}.ts`, import.meta.url).href
++			: specifier, context)
++	},
++})
++after(() => hooks.deregister())
++
++const input = new File(["Native upload 世界"], "native.txt", { type: "text/plain" })
++const object = { id: "native-file", object: "file", filename: input.name, mediaType: input.type,
++	bytes: input.size, status: "ready", createdAt: 1 }
++let failStorage = false
++let released = false
++const seen: string[] = []
++installRuntime({
++	version: 1, kind: "native", apiOrigin: "https://service.test",
++	fetch: async (input, init) => {
++		const request = new Request(input, init)
++		seen.push(`${request.method} ${request.url}`)
++		if (request.url === "https://service.test/v1/files")
++			return Response.json({ _tag: "FilesDisabled", message: "Proxy uploads are off." }, { status: 409 })
++		if (request.url === "https://service.test/v1/files/uploads")
++			return Response.json({ file: { ...object, status: "pending" }, url: "https://storage.test/file?signed=value",
++				method: "PUT", headers: { "content-type": object.mediaType, "content-length": String(object.bytes) }, expiresAt: 1000 }, { status: 201 })
++		if (request.url.startsWith("https://storage.test/")) {
++			assert.ok(init?.signal)
++			assert.equal(await request.text(), "Native upload 世界")
++			return new Response(new ReadableStream({ cancel() { released = true } }), { status: failStorage ? 403 : 200 })
++		}
++		if (request.url === "https://service.test/v1/files/native-file/complete") {
++			assert.equal(released, true)
++			return Response.json(object)
++		}
++		throw new Error("Unexpected request.")
++	},
++	signIn: async () => {}, signOut: async () => {}, writeClipboard: async () => {}, openExternal: async () => {},
++	createWebSocket: () => { throw new Error("Not used in this test.") },
++})
++
++async function upload() {
++	const { uploadFileAtom } = await import("../src/atoms/files.ts")
++	const registry = AtomRegistry.make()
++	const unmount = registry.mount(uploadFileAtom)
++	try {
++		return await new Promise((resolve, reject) => {
++			registry.subscribe(uploadFileAtom, (value) => {
++				if (AsyncResult.isSuccess(value)) resolve(value.value)
++				else if (AsyncResult.isFailure(value)) reject(value.cause)
++			})
++			registry.set(uploadFileAtom, input)
++		})
++	} finally { unmount(); registry.dispose() }
++}
++
++test("direct file uploads use native transport and close storage responses before completion", { timeout: 5000 }, async (t) => {
++	t.mock.method(globalThis, "fetch", () => { throw new Error("Browser fetch must not receive native file requests.") })
++	assert.deepEqual(await upload(), object)
++	assert.deepEqual(seen, ["POST https://service.test/v1/files", "POST https://service.test/v1/files/uploads",
++		"PUT https://storage.test/file?signed=value", "POST https://service.test/v1/files/native-file/complete"])
++})
++
++test("a failed storage upload releases its response and cannot mark the file ready", { timeout: 5000 }, async () => {
++	failStorage = true
++	released = false
++	seen.length = 0
++	await assert.rejects(upload())
++	assert.equal(released, true)
++	assert.equal(seen.some((path) => path.endsWith("/complete")), false)
++})
+diff --git a/test/native-transport.test.ts b/test/native-transport.test.ts
+new file mode 100644
+index 0000000..2dd42ad
+--- /dev/null
++++ b/test/native-transport.test.ts
+@@ -0,0 +1,70 @@
++import assert from "node:assert/strict"
++import { registerHooks } from "node:module"
++import { after, test } from "node:test"
++import { Cause, Effect } from "effect"
++import * as AsyncResult from "effect/reactivity/AsyncResult"
++import * as AtomRegistry from "effect/reactivity/AtomRegistry"
++import { installRuntime } from "../src/lib/runtime.ts"
++
++const hooks = registerHooks({
++	resolve(specifier, context, nextResolve) {
++		return nextResolve(specifier.startsWith("@/")
++			? new URL(`../src/${specifier.slice(2)}.ts`, import.meta.url).href
++			: specifier, context)
++	},
++})
++after(() => hooks.deregister())
++
++test("the API atom uses the native API origin and transport", { timeout: 5000 }, async (t) => {
++	const seen: string[] = []
++	installRuntime({
++		version: 1,
++		kind: "native",
++		apiOrigin: "https://api.example.com",
++		fetch: async (input, init) => {
++			const request = new Request(input, init)
++			seen.push(request.url)
++			return Response.json({
++				userId: "person", profile: {}, memberships: [],
++				platformAdmin: false, canCreateOrganization: true, expiresAt: "2030-01-01T00:00:00Z",
++			})
++		},
++		signIn: async () => {}, signOut: async () => {},
++		writeClipboard: async () => {}, openExternal: async () => {},
++		createWebSocket: () => { throw new Error("Not used in this test.") },
++	})
++	t.mock.method(globalThis, "fetch", () => { throw new Error("Browser fetch must not receive native requests.") })
++	const { Api, apiRuntime } = await import("../src/lib/api.ts")
++	const atom = apiRuntime.atom(Effect.gen(function* () {
++		const client = yield* Api
++		return yield* client.api.account.session()
++	}))
++	const registry = AtomRegistry.make()
++	t.after(() => registry.dispose())
++	const result = await new Promise<string>((resolve, reject) => {
++		registry.subscribe(atom, (value) => {
++			if (AsyncResult.isSuccess(value)) resolve(value.value.userId)
++			else if (AsyncResult.isFailure(value)) reject(new Error(Cause.pretty(value.cause)))
++		}, { immediate: true })
++	})
++	assert.equal(result, "person")
++	assert.deepEqual(seen, ["https://api.example.com/auth/session"])
++
++	const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location")
++	t.after(() => {
++		if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation)
++		else Reflect.deleteProperty(globalThis, "location")
++	})
++	let complete!: (path: string) => void
++	const returned = new Promise<string>((resolve) => { complete = resolve })
++	Object.defineProperty(globalThis, "location", { configurable: true, value: {
++		replace: complete,
++		assign: () => { throw new Error("Native sign-in must replace its history entry.") },
++	} })
++	const { signInAtom } = await import("../src/atoms/account.ts")
++	const unmount = registry.mount(signInAtom)
++	t.after(unmount)
++	registry.set(signInAtom, { email: "person@example.com", returnTo: "//evil.test" })
++	assert.equal(await returned, "/")
++	assert.deepEqual(seen, ["https://api.example.com/auth/session"])
++})
+diff --git a/test/runtime.test.ts b/test/runtime.test.ts
+new file mode 100644
+index 0000000..728624c
+--- /dev/null
++++ b/test/runtime.test.ts
+@@ -0,0 +1,43 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { apiOrigin, externalUrl, installRuntime, nativeRuntime, returnPath, writeClipboard } from "../src/lib/runtime.ts"
++
++test("external links reject active schemes and hidden credentials", () => {
++	for (const value of ["javascript:alert(1)", "file:///tmp/test", "http://example.com", "https://name:secret@example.com", "/relative"])
++		assert.throws(() => externalUrl(value))
++	assert.equal(externalUrl("https://example.com/help"), "https://example.com/help")
++})
++
++test("browser mode has no native setup", () => {
++	assert.equal(nativeRuntime(), undefined)
++	assert.equal(apiOrigin(), "")
++})
++
++test("login return paths cannot escape the app origin", () => {
++	for (const value of [null, undefined, "https://evil.test", "//evil.test", "/\\evil.test", "/\n/evil.test"])
++		assert.equal(returnPath(value), "/")
++	assert.equal(returnPath("/c/chat?tab=details#latest"), "/c/chat?tab=details#latest")
++})
++
++test("native setup rejects unsafe origins and cannot be replaced", async () => {
++	const copied: string[] = []
++	const runtime = {
++		version: 1 as const,
++		kind: "native" as const,
++		apiOrigin: "https://api.example.com",
++		fetch: globalThis.fetch,
++		signIn: async () => {},
++		signOut: async () => {},
++		writeClipboard: async (text: string) => { copied.push(text) },
++		openExternal: async () => {},
++		createWebSocket: () => { throw new Error("Not used in this test.") },
++	}
++	for (const apiOrigin of ["http://api.example.com", "https://api.example.com/", "https://api.example.com/path", "https://name:secret@api.example.com", "https://api.example.com?x=1"])
++		assert.throws(() => installRuntime({ ...runtime, apiOrigin }))
++	installRuntime(runtime)
++	assert.equal(apiOrigin(), runtime.apiOrigin)
++	assert.equal(Object.isFrozen(nativeRuntime()), true)
++	await writeClipboard("hello")
++	assert.deepEqual(copied, ["hello"])
++	assert.throws(() => installRuntime(runtime))
++})
+diff --git a/test/viewport.test.ts b/test/viewport.test.ts
+new file mode 100644
+index 0000000..572356a
+--- /dev/null
++++ b/test/viewport.test.ts
+@@ -0,0 +1,36 @@
++import assert from "node:assert/strict"
++import { test } from "node:test"
++import { watchViewport } from "../src/lib/viewport.ts"
++
++test("keyboard resize keeps focus alone, zoom keeps its layout, and cleanup stops work", () => {
++	const values = new Map<string, string>()
++	const viewport = Object.assign(new EventTarget(), { height: 800, offsetTop: 0, scale: 1 })
++	let callback: FrameRequestCallback | undefined
++	const window = Object.assign(new EventTarget(), {
++		visualViewport: viewport,
++		innerHeight: 800,
++		document: { documentElement: { style: {
++			setProperty: (key: string, value: string) => values.set(key, value),
++			removeProperty: (key: string) => values.delete(key),
++		} } },
++		requestAnimationFrame: (next: FrameRequestCallback) => { callback = next; return 1 },
++		cancelAnimationFrame: () => { callback = undefined },
++	})
++	const stop = watchViewport(window as unknown as Window)
++	assert.equal(values.get("--viewport-height"), "800px")
++	viewport.height = 410
++	viewport.offsetTop = 12
++	viewport.dispatchEvent(new Event("resize"))
++	callback?.(0)
++	assert.equal(values.get("--viewport-height"), "410px")
++	assert.equal(values.get("--viewport-top"), "12px")
++	viewport.scale = 2
++	viewport.height = 205
++	viewport.dispatchEvent(new Event("resize"))
++	callback?.(0)
++	assert.equal(values.get("--viewport-height"), "410px")
++	stop()
++	assert.equal(values.size, 0)
++	viewport.dispatchEvent(new Event("scroll"))
++	assert.equal(callback, undefined)
++})
+diff --git a/tsconfig.runtime.json b/tsconfig.runtime.json
+new file mode 100644
+index 0000000..e3ace92
+--- /dev/null
++++ b/tsconfig.runtime.json
+@@ -0,0 +1,11 @@
++{
++	"extends": "./tsconfig.json",
++	"include": ["src/lib/runtime.ts"],
++	"compilerOptions": {
++		"allowImportingTsExtensions": false,
++		"noEmit": false,
++		"declaration": true,
++		"rootDir": "src/lib",
++		"outDir": "runtime"
++	}
++}
+diff --git a/vite.config.ts b/vite.config.ts
+index a8f945a..09a7e9c 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -21,6 +21,7 @@ const proxy = {
+ export default defineConfig({
+ 	resolve: { tsconfigPaths: true },
+ 	plugins: [tailwindcss(), react()],
++	build: { license: { fileName: "licenses/dependencies.md" } },
+ 	server: {
+ 		port: 5173,
+ 		// `ws` also sends the Live WebSocket of a live Chat to OpenBot.

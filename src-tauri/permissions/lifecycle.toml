@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "lifecycle-channel"
+description = "Read typed activity state without general event access."
+commands.allow = ["lifecycle_subscribe", "lifecycle_unsubscribe"]

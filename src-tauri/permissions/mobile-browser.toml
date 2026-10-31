@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "mobile-browser-return"
+description = "Receive a typed return notice and resume a private native browser attempt."
+commands.allow = ["browser_sign_in_watch", "browser_sign_in_resume"]

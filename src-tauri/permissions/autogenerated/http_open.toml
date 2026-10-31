@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-http-open"
+description = "Enables the http_open command without any pre-configured scope."
+commands.allow = ["http_open"]
+
+[[permission]]
+identifier = "deny-http-open"
+description = "Denies the http_open command without any pre-configured scope."
+commands.deny = ["http_open"]

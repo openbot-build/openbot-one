@@ -1,0 +1,11 @@
+{
+  "identifier": "main",
+  "description": "Only the bundled main app can use the native connection and transport, write clipboard text, and open HTTPS links.",
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "native-runtime",
+    "clipboard-manager:allow-write-text",
+    {"identifier": "opener:allow-open-url", "allow": [{"url": "https://*"}]}
+  ]
+}

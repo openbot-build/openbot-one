@@ -1,0 +1,30 @@
+name: openbot-one-local
+services:
+  postgres:
+    image: postgres:18.6-alpine3.24@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
+    environment:
+      POSTGRES_USER: openbot_dev
+      POSTGRES_PASSWORD: openbot_dev
+      POSTGRES_DB: openbot
+    ports:
+      - "127.0.0.1:19332:5432"
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openbot_dev -d openbot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  storage:
+    image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+    environment:
+      RUSTFS_ACCESS_KEY: openbot_dev
+      RUSTFS_SECRET_KEY: openbot_dev_secret
+      RUSTFS_OBS_LOG_DIRECTORY: ""
+    ports:
+      - "127.0.0.1:19300:9000"
+    volumes:
+      - storage:/data
+volumes:
+  postgres:
+  storage:

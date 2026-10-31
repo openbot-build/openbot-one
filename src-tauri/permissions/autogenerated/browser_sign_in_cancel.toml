@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-sign-in-cancel"
+description = "Enables the browser_sign_in_cancel command without any pre-configured scope."
+commands.allow = ["browser_sign_in_cancel"]
+
+[[permission]]
+identifier = "deny-browser-sign-in-cancel"
+description = "Denies the browser_sign_in_cancel command without any pre-configured scope."
+commands.deny = ["browser_sign_in_cancel"]

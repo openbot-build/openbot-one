@@ -1,0 +1,26 @@
+# Use only app source and the fixed Web package. No local state enters the image.
+**
+!package.json
+!pnpm-lock.yaml
+!.node-version
+!rust-toolchain.toml
+!tsconfig.json
+!src
+!src/**
+!scripts
+!scripts/**
+!test
+!test/**
+!e2e
+!e2e/**
+!src-tauri
+!src-tauri/**
+!vendor
+!vendor/**
+!dev
+!dev/linux
+!dev/linux/**
+!dev/notices
+!dev/notices/**
+src-tauri/target
+src-tauri/gen
